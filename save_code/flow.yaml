@@ -1,0 +1,6 @@
+# Control which steps to run in full_flow.py
+steps:
+  laplacian: true       # Step 1: Calculate Laplacian focus metrics
+  threshold: true       # Step 2: Add Focus_severity thresholds
+  is_measurable: true   # Step 3: Gemini measurability analysis
+  concatenate: true     # Step 4: Concatenate with Excel annotations

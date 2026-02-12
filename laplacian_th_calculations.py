@@ -71,12 +71,17 @@ def main():
                         help='Input CSV file (default: laplacian_calculations.csv)')
     parser.add_argument('-o', '--output', default='laplacian_th_calculations.csv',
                         help='Output CSV file (default: laplacian_th_calculations.csv)')
+    parser.add_argument('--output-dir', default=None,
+                        help='Parent output directory (creates laplacian_th/ subdir). If omitted, creates timestamped dir.')
     args = parser.parse_args()
 
-    # Create timestamped output directory
+    # Create output directory
     script_dir = Path(__file__).parent.resolve()
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_dir = script_dir / "output_dir" / f"laplacian_th_{timestamp}"
+    if args.output_dir:
+        output_dir = Path(args.output_dir) / "laplacian_th"
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        output_dir = script_dir / "output_dir" / f"laplacian_th_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine output CSV path: use user-provided path or default inside output_dir

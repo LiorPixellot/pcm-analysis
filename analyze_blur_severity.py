@@ -140,17 +140,27 @@ def run_analysis(df, label, out_dir):
 
 
 def main():
-    # Resolve input CSV
-    if len(sys.argv) > 1:
-        csv_path = sys.argv[1]
-    else:
-        csv_path = "laplacian_th_with_blur_and_measurable.csv"
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Analyze correlation between AVERAGE_BLUR_AVG and Focus_severity"
+    )
+    parser.add_argument("input_csv", nargs="?", default="laplacian_th_with_blur_and_measurable.csv",
+                        help="Input CSV file (default: laplacian_th_with_blur_and_measurable.csv)")
+    parser.add_argument("--output-dir", default=None,
+                        help="Parent output directory (creates analyze_blur/ subdir). If omitted, creates timestamped dir.")
+    args = parser.parse_args()
+
+    csv_path = args.input_csv
 
     if not os.path.isfile(csv_path):
         print(f"Error: file not found: {csv_path}")
         sys.exit(1)
 
-    df = pd.read_csv(csv_path)
+    if csv_path.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(csv_path)
+    else:
+        df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} rows from {csv_path}")
 
     # Filter to rows with blur data
@@ -167,8 +177,11 @@ def main():
         print("Column 'is_measurable' not found — running all-data analysis only.")
 
     # Create output directory
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    out_dir = os.path.join("output_dir", f"analyze_blur_{timestamp}")
+    if args.output_dir:
+        out_dir = os.path.join(args.output_dir, "analyze_blur")
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        out_dir = os.path.join("output_dir", f"analyze_blur_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
     print(f"Output directory: {out_dir}\n")
 

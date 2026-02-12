@@ -186,16 +186,21 @@ def main():
                         help='Tolerance for validation (default: 0.001)')
     parser.add_argument('-w', '--workers', type=int, default=cpu_count(),
                         help='Number of parallel workers (default: number of CPUs)')
+    parser.add_argument('--output-dir', default=None,
+                        help='Parent output directory (creates laplacian/ subdir). If omitted, creates timestamped dir.')
     args = parser.parse_args()
 
     if not os.path.isdir(args.data_dir):
         print(f'Error: {args.data_dir} is not a directory', file=sys.stderr)
         sys.exit(1)
 
-    # Create timestamped output directory
+    # Create output directory
     script_dir = Path(__file__).parent.resolve()
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_dir = script_dir / "output_dir" / f"laplacian_{timestamp}"
+    if args.output_dir:
+        output_dir = Path(args.output_dir) / "laplacian"
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        output_dir = script_dir / "output_dir" / f"laplacian_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine output CSV path: use user-provided path or default inside output_dir

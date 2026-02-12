@@ -2,8 +2,9 @@
 """
 Detect Issues Script
 
-Scans a data directory directly (no CSV input needed) and uses Gemini to detect
-camera issues: focus problems, condensation, obstructions, and dark field conditions.
+Reads PQS_blur_by_venue.xlsx and processes one event per venue (first event with
+a focus dir), using Gemini to detect camera issues: focus problems, condensation,
+obstructions, and dark field conditions.
 Optionally uses few-shot example images from a specified directory.
 """
 
@@ -37,6 +38,7 @@ from is_measurable import (
     pil_to_bytes,
     load_images,
 )
+from run_is_measurable import read_blur_xlsx, find_venue_focus_dir
 
 
 DETECT_ISSUES_PROMPT = """You are analyzing camera images from a sports venue to detect issues.
@@ -46,88 +48,82 @@ The images are from a paired camera setup:
 - CAM1 = left camera
 - joined = side-by-side overlap composition (left half from CAM1, right half from CAM0)
 
-TASK:
-1. Is the scene measurable? Answer "No" if: field is too dark (main lights OFF).
-2. If measurable, check for issues: Focus / Object / Condensation / None.
+TASK: Check for issues: Focus / Object / None.
 
 IMPORTANT — Focus detection:
-many times, A key indicator of a focus problem is a
-LARGE DIFFERENCE IN SHARPNESS between CAM0 and CAM1. Compare edges, field lines, text,
-and fine details between the two cameras. If one camera is noticeably sharper/crisper than
-the other, that is a focus issue. Use the joined overlap image to directly compare the
-same scene area from both cameras side by side.
+A key indicator of a focus problem is a LARGE DIFFERENCE IN SHARPNESS between CAM0 and CAM1.
+Compare edges, field lines, text, and fine details between the two cameras. If one camera is
+noticeably sharper/crisper than the other, that is a focus issue. Use the joined overlap image
+to directly compare the same scene area from both cameras side by side.
+
+another key identicator 
+Identify segments in the video where there is a change in camera focus.
+Some areas appear sharp and clear, while other areas appear blurred or smoothed. Flag any transitions between sharp and soft focus.
 
 Return ONLY valid JSON with exactly this structure:
 {
     "observation": "Brief description of what you see",
-    "is_measurable": "Yes" or "No",
     "has_issue": "Yes" or "No",
-    "issue_type": "Focus" or "Object" or "Condensation" or "None"
+    "issue_type": "Focus" or "Object" or "None"
 }
 
 Rules:
-- If is_measurable is "No", set has_issue to "No" and issue_type to "None"
-- Condensation on lens: is_measurable = "Yes", has_issue = "Yes", issue_type = "Condensation"
+- If the field is too dark to analyze or field is covered havely by snow (not only on sides), set has_issue to "No" and issue_type to "None"
 - Return ONLY valid JSON, no markdown formatting or extra text"""
 
 
-def scan_database(data_dir: Path, venue_filter: Optional[set] = None) -> List[Dict[str, str]]:
-    """Walk <data_dir>/<venue_id>/<event_id>/focus/ and return list of entry dicts.
+EXAMPLE_JOINED_LABEL = """This is an example of a joined image (left half = CAM1, right half = CAM0). Notice the difference in sharpness between the two cameras."""
 
-    Returns list of {"venue_id", "event_id", "focus_dir"} dicts.
-    Filters by venue_filter if provided.
+EXAMPLE_CHANGE_FOCUS_LABEL = """This is an example of a change in camera focus. You can see the change inside the camera — some areas appear sharp while others are blurred or smoothed."""
+
+EXAMPLE_COMPLETE_FOCUS_LABEL = """This is an example of a completely smoothed camera with bad focus all over the lens. The entire image lacks sharpness."""
+
+# Ordered list of (subdirectory_name, section_title, label_constant)
+EXAMPLE_CATEGORIES = [
+    ("joined", "Joined image (sharpness difference between cameras)", EXAMPLE_JOINED_LABEL),
+    ("change_focus", "Change in camera focus", EXAMPLE_CHANGE_FOCUS_LABEL),
+    ("complete_focus", "Complete focus problem", EXAMPLE_COMPLETE_FOCUS_LABEL),
+]
+
+
+def load_examples(examples_dir: Path) -> Dict[str, List[bytes]]:
+    """Load example images from categorized subdirectories.
+
+    Walks known subdirectories (joined/, change_focus/, complete_focus/) and
+    loads all *.jpg/*.png files from each.
+
+    Returns dict keyed by category name, each value a list of image bytes.
     """
-    entries = []
-    if not data_dir.is_dir():
-        print(f"  Error: data directory not found: {data_dir}")
-        return entries
-
-    for venue_path in sorted(data_dir.iterdir()):
-        if not venue_path.is_dir():
-            continue
-        venue_id = venue_path.name
-        if venue_filter and venue_id not in venue_filter:
-            continue
-        for event_path in sorted(venue_path.iterdir()):
-            if not event_path.is_dir():
-                continue
-            focus_dir = event_path / "focus"
-            if focus_dir.is_dir():
-                entries.append({
-                    "venue_id": venue_id,
-                    "event_id": event_path.name,
-                    "focus_dir": str(focus_dir),
-                })
-    return entries
-
-
-def load_examples(examples_dir: Path) -> List[Tuple[str, List[bytes]]]:
-    """Load example images from a flat directory of .jpg files.
-
-    Each image is loaded as bytes using pil_to_bytes().
-
-    Returns list of (filename_stem, [image_bytes]) tuples.
-    """
-    examples = []
+    examples: Dict[str, List[bytes]] = {}
     if not examples_dir.is_dir():
         print(f"  Warning: examples directory not found: {examples_dir}")
         return examples
 
-    for img_path in sorted(examples_dir.glob("*.jpg")):
-        try:
-            img_bytes = pil_to_bytes(Image.open(img_path))
-            examples.append((img_path.stem, [img_bytes]))
-        except Exception as e:
-            print(f"  Warning: failed to load example {img_path.name}: {e}")
+    for category, _, _ in EXAMPLE_CATEGORIES:
+        cat_dir = examples_dir / category
+        if not cat_dir.is_dir():
+            print(f"  Warning: example category dir not found: {cat_dir}")
+            continue
+
+        images = []
+        for img_path in sorted(cat_dir.glob("*.jpg")) + sorted(cat_dir.glob("*.png")):
+            try:
+                img_bytes = pil_to_bytes(Image.open(img_path))
+                images.append(img_bytes)
+            except Exception as e:
+                print(f"  Warning: failed to load example {img_path.name}: {e}")
+
+        if images:
+            examples[category] = images
 
     return examples
 
 
 def analyze_venue(client: genai.Client, model_name: str,
                   cam0_bytes: bytes, cam1_bytes: bytes, joined_bytes: Optional[bytes],
-                  hard_examples: Optional[List[Tuple[str, List[bytes]]]] = None,
+                  examples: Optional[Dict[str, List[bytes]]] = None,
                   media_resolution: Optional[str] = None) -> Tuple[dict, dict]:
-    """Build parts list with prompt + optional hard examples + venue images, call Gemini.
+    """Build parts list with prompt + optional categorized examples + venue images, call Gemini.
 
     Returns (result_dict, token_usage_dict).
     """
@@ -137,16 +133,18 @@ def analyze_venue(client: genai.Client, model_name: str,
 
     parts = [types.Part.from_text(text=DETECT_ISSUES_PROMPT)]
 
-    # Insert hard examples as a batch
-    if hard_examples:
+    # Insert categorized examples
+    if examples:
         parts.append(types.Part.from_text(
-            text="\n\nReference: Examples of Venues with Known Issues\n"
-                 "The following are examples of venues where issues were confirmed:"
+            text="\n\nReference examples of known focus issues:"
         ))
-        for i, (venue_id, image_list) in enumerate(hard_examples, 1):
-            parts.append(types.Part.from_text(text=f"\nExample venue {i}:"))
-            for img_bytes in image_list:
+        for category, title, label in EXAMPLE_CATEGORIES:
+            if category not in examples:
+                continue
+            parts.append(types.Part.from_text(text=f"\nExample — {title}:"))
+            for img_bytes in examples[category]:
                 parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=img_bytes, **image_kwargs))
+            parts.append(types.Part.from_text(text=label))
 
         parts.append(types.Part.from_text(
             text="\n\nNow analyze the following venue images:"
@@ -199,8 +197,7 @@ def analyze_venue(client: genai.Client, model_name: str,
 
         token_usage = get_token_usage(response)
         return {
-            "is_measurable": "Error",
-            "has_issue": "No",
+            "has_issue": "Error",
             "issue_type": "None",
             "observation": reason,
         }, token_usage
@@ -214,8 +211,7 @@ def analyze_venue(client: genai.Client, model_name: str,
         result = json.loads(response_text)
     except json.JSONDecodeError:
         result = {
-            "is_measurable": "Unknown",
-            "has_issue": "No",
+            "has_issue": "Error",
             "issue_type": "None",
             "observation": f"Failed to parse response: {response_text[:200]}",
         }
@@ -225,7 +221,7 @@ def analyze_venue(client: genai.Client, model_name: str,
 
 
 def process_entry(index: int, entry: dict, client: genai.Client, model_name: str,
-                  hard_examples: Optional[List[Tuple[str, List[bytes]]]] = None,
+                  examples: Optional[Dict[str, List[bytes]]] = None,
                   media_resolution: Optional[str] = None) -> dict:
     """Load images and call analyze_venue. Used as parallel worker.
 
@@ -238,15 +234,13 @@ def process_entry(index: int, entry: dict, client: genai.Client, model_name: str
     result_row = {
         "venue_id": venue_id,
         "event_id": event_id,
-        "is_measurable": "",
         "has_issue": "",
         "issue_type": "",
     }
 
     images = load_images(focus_dir)
     if images is None:
-        result_row["is_measurable"] = "N/A"
-        result_row["has_issue"] = "No"
+        result_row["has_issue"] = "N/A"
         result_row["issue_type"] = "None"
         return {"index": index, "result_row": result_row, "token_usage": None,
                 "processed": False, "skipped": True, "skip_reason": "could not load images"}
@@ -256,41 +250,36 @@ def process_entry(index: int, entry: dict, client: genai.Client, model_name: str
     try:
         result, token_usage = analyze_venue(
             client, model_name, cam0_bytes, cam1_bytes, joined_bytes,
-            hard_examples, media_resolution,
+            examples, media_resolution,
         )
 
-        is_measurable = result.get("is_measurable", "Unknown")
-        result_row["is_measurable"] = is_measurable
-
-        if is_measurable == "No":
-            result_row["has_issue"] = "No"
-            result_row["issue_type"] = "None"
-        else:
-            has_issue = result.get("has_issue", "No")
-            issue_type = result.get("issue_type", "None")
-            result_row["has_issue"] = has_issue
-            result_row["issue_type"] = issue_type if issue_type else "None"
+        has_issue = result.get("has_issue", "No")
+        issue_type = result.get("issue_type", "None")
+        result_row["has_issue"] = has_issue
+        result_row["issue_type"] = issue_type if issue_type else "None"
 
         return {"index": index, "result_row": result_row, "token_usage": token_usage,
                 "processed": True, "skipped": False}
 
     except Exception as e:
         tb = traceback.format_exc()
-        result_row["is_measurable"] = "Error"
-        result_row["has_issue"] = "No"
+        result_row["has_issue"] = "Error"
         result_row["issue_type"] = "None"
         return {"index": index, "result_row": result_row, "token_usage": None,
                 "processed": False, "skipped": True, "error": str(e), "traceback": tb}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scan data directory and detect camera issues using Gemini")
-    parser.add_argument("--database", type=str, required=True, help="Data directory with <venue_id>/<event_id>/focus/ structure")
-    parser.add_argument("--use-examples", type=str, default=None, metavar="DIR", help="Directory containing example images of focus problems")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of entries to process")
+    parser = argparse.ArgumentParser(description="Detect camera issues using Gemini (xlsx-driven, one event per venue)")
+    parser.add_argument("--dataset", type=str, required=True, help="Data directory path (e.g. all_data_02_09)")
+    parser.add_argument("--blur-xlsx", type=str, default="PQS_blur_by_venue.xlsx", help="Path to PQS blur xlsx (default: PQS_blur_by_venue.xlsx)")
+    parser.add_argument("--use-examples", type=str, default="examples/", metavar="DIR", help="Directory containing example images of focus problems (default: examples/)")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of venues to process")
     parser.add_argument("--max-workers", type=int, default=None, help="Max parallel Gemini API calls (default: from config.yaml or 10)")
     parser.add_argument("--venues", type=str, default=None, help="YAML file with venue filter (default: venues.yaml if exists)")
     parser.add_argument("--output", type=str, default=None, help="Output CSV path (default: auto in output_dir/)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Parent output directory (creates detect_issues/ subdir). If omitted, creates timestamped dir.")
     args = parser.parse_args()
 
     # Load config
@@ -304,10 +293,55 @@ def main():
     # Load venue filter
     is_full, venue_filter = load_venues(args.venues)
 
-    # Create timestamped output directory
     script_dir = Path(__file__).parent.resolve()
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_dir = script_dir / "output_dir" / f"detect_issues_{timestamp}"
+
+    # Read xlsx
+    xlsx_path = Path(args.blur_xlsx) if Path(args.blur_xlsx).is_absolute() else script_dir / args.blur_xlsx
+    if not xlsx_path.exists():
+        print(f"  Error: xlsx file not found: {xlsx_path}")
+        return
+
+    venue_rows = read_blur_xlsx(xlsx_path)
+    print(f"  Loaded {len(venue_rows)} venues from {xlsx_path.name}")
+
+    # Dataset directory
+    dataset_dir = Path(args.dataset) if Path(args.dataset).is_absolute() else script_dir / args.dataset
+    if not dataset_dir.is_dir():
+        print(f"  Error: dataset directory not found: {dataset_dir}")
+        return
+
+    # Build work items: one event per venue, driven by xlsx
+    work_items = []  # list of (venue_id, event_id, focus_dir_or_None)
+
+    for row in venue_rows:
+        venue_id = str(row.get("PIXELLOT_VENUE_ID", "")).strip()
+        if not venue_id:
+            continue
+
+        # Apply venue filter
+        if not is_full and venue_filter and venue_id not in venue_filter:
+            continue
+
+        focus_dir = find_venue_focus_dir(dataset_dir, venue_id)
+        if focus_dir is not None:
+            event_id = focus_dir.parent.name
+        else:
+            event_id = ""
+
+        work_items.append((venue_id, event_id, focus_dir))
+
+    if args.limit:
+        work_items = work_items[:args.limit]
+
+    found_count = sum(1 for _, _, fd in work_items if fd is not None)
+    not_found_count = len(work_items) - found_count
+
+    # Create output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir) / "detect_issues"
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        output_dir = script_dir / "output_dir" / f"detect_issues_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Output CSV path
@@ -318,20 +352,16 @@ def main():
 
     cost_path = output_dir / "cost.txt"
 
-    # Scan database
-    data_dir = script_dir / args.database
-    entries = scan_database(data_dir, venue_filter if not is_full else None)
-
-    if args.limit:
-        entries = entries[:args.limit]
-
     print("=" * 60)
     print("  DETECT ISSUES")
     print("=" * 60)
     print(f"  Output dir: {output_dir}")
-    print(f"  Database: {data_dir}")
+    print(f"  Dataset: {dataset_dir}")
+    print(f"  XLSX: {xlsx_path.name}")
     print(f"  Model: {model_name}")
-    print(f"  Entries: {len(entries)}")
+    print(f"  Total venues: {len(work_items)}")
+    print(f"    Found in dataset: {found_count}")
+    print(f"    Not in dataset: {not_found_count}")
     if is_full:
         print("  Venues: ALL (full mode)")
     else:
@@ -343,15 +373,18 @@ def main():
         print(f"  Limit: {args.limit}")
     print(f"  Use examples: {args.use_examples}")
 
-    # Load hard examples if enabled
-    hard_examples = None
+    # Load categorized examples if enabled
+    examples = None
     if args.use_examples:
-        hard_examples = load_examples(Path(args.use_examples))
-        print(f"  Examples loaded: {len(hard_examples)} from {args.use_examples}")
+        examples = load_examples(Path(args.use_examples))
+        total_example_images = sum(len(imgs) for imgs in examples.values())
+        print(f"  Examples loaded: {total_example_images} images from {len(examples)} categories")
+        for category, imgs in examples.items():
+            print(f"    {category}: {len(imgs)} images")
     print("=" * 60)
 
-    if not entries:
-        print("  No entries found. Exiting.")
+    if not work_items:
+        print("  No venues to process. Exiting.")
         return
 
     # Retry settings
@@ -383,64 +416,94 @@ def main():
     # Load pricing for running cost updates
     model_pricing = load_model_pricing()
 
-    # Process entries in parallel
-    total_entries = len(entries)
-    results = [None] * total_entries
+    # Process venues
+    total_items = len(work_items)
+    results = [None] * total_items
     completed = 0
 
-    fieldnames = ["venue_id", "event_id", "is_measurable", "has_issue", "issue_type"]
+    fieldnames = ["venue_id", "event_id", "has_issue", "issue_type"]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(process_entry, i, entry, client, model_name, hard_examples, media_resolution): i
-            for i, entry in enumerate(entries)
-        }
-
-        for future in concurrent.futures.as_completed(future_to_index):
-            res = future.result()
-            idx = res["index"]
-            result_row = res["result_row"]
-            results[idx] = result_row
+    # Separate items: those with focus dirs (need Gemini) vs those without
+    gemini_items = []  # (work_index, entry_dict)
+    for wi, (venue_id, event_id, focus_dir) in enumerate(work_items):
+        if focus_dir is None:
+            result_row = {
+                "venue_id": venue_id,
+                "event_id": "",
+                "has_issue": "N/A",
+                "issue_type": "None",
+            }
+            results[wi] = result_row
+            skipped_count += 1
             completed += 1
+            print(f"[{completed}/{total_items}] {venue_id} — N/A: not in dataset")
+        else:
+            entry = {
+                "venue_id": venue_id,
+                "event_id": event_id,
+                "focus_dir": str(focus_dir),
+            }
+            gemini_items.append((wi, entry))
 
-            venue_id = result_row["venue_id"]
-            event_id = result_row["event_id"]
+    # Process venues with images in parallel
+    if gemini_items:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_wi = {}
+            for wi, entry in gemini_items:
+                future = executor.submit(
+                    process_entry, wi, entry, client, model_name, examples, media_resolution,
+                )
+                future_to_wi[future] = (wi, entry)
 
-            if res.get("skipped"):
-                reason = res.get("skip_reason") or res.get("error", "unknown")
-                print(f"[{completed}/{total_entries}] {venue_id}/{event_id} — skipped: {reason}")
-                if res.get("traceback"):
-                    print(res["traceback"])
-                skipped_count += 1
-            elif res["processed"]:
-                token_usage = res["token_usage"]
-                total_input_tokens += token_usage["input_tokens"]
-                total_output_tokens += token_usage["output_tokens"]
-                total_thinking_tokens += token_usage["thinking_tokens"]
-                processed_count += 1
+            for future in concurrent.futures.as_completed(future_to_wi):
+                wi, entry = future_to_wi[future]
+                res = future.result()
+                result_row = res["result_row"]
+                results[wi] = result_row
+                completed += 1
 
-                print(f"[{completed}/{total_entries}] {venue_id}/{event_id}"
-                      f" — measurable: {result_row['is_measurable']}"
-                      f", issue: {result_row['has_issue']}"
-                      f", type: {result_row['issue_type']}"
-                      f", tokens: {token_usage['total_tokens']:,}")
+                venue_id = result_row["venue_id"]
+                event_id = result_row["event_id"]
 
-            if completed % 100 == 0:
-                pricing = calculate_pricing(model_name, total_input_tokens, total_output_tokens + total_thinking_tokens, model_pricing)
-                print(f"  --- Cost after {completed} entries: ${pricing['total_price']:.6f} ---")
+                if res.get("skipped"):
+                    reason = res.get("skip_reason") or res.get("error", "unknown")
+                    print(f"[{completed}/{total_items}] {venue_id}/{event_id} — skipped: {reason}")
+                    if res.get("traceback"):
+                        print(res["traceback"])
+                    skipped_count += 1
+                elif res["processed"]:
+                    token_usage = res["token_usage"]
+                    total_input_tokens += token_usage["input_tokens"]
+                    total_output_tokens += token_usage["output_tokens"]
+                    total_thinking_tokens += token_usage["thinking_tokens"]
+                    processed_count += 1
+
+                    print(f"[{completed}/{total_items}] {venue_id}/{event_id}"
+                          f" — issue: {result_row['has_issue']}"
+                          f", type: {result_row['issue_type']}"
+                          f", tokens: {token_usage['total_tokens']:,}")
+
+                if completed % 100 == 0:
+                    pricing = calculate_pricing(model_name, total_input_tokens, total_output_tokens + total_thinking_tokens, model_pricing)
+                    print(f"  --- Cost after {completed} venues: ${pricing['total_price']:.6f} ---")
 
     # Write output CSV
     with open(output_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(results)
+        for row in results:
+            if row is not None:
+                writer.writerow(row)
 
     print("\n" + "=" * 60)
     print("  SUMMARY")
     print("=" * 60)
     print(f"  Output dir: {output_dir}")
-    print(f"  Processed: {processed_count}")
-    print(f"  Skipped: {skipped_count}")
+    print(f"  Total venues: {total_items}")
+    print(f"    Found in dataset: {found_count}")
+    print(f"    Not in dataset: {not_found_count}")
+    print(f"  Processed (Gemini): {processed_count}")
+    print(f"  Skipped/N/A: {skipped_count}")
     print(f"  Output: {output_path}")
 
     # Calculate and display cost
@@ -467,12 +530,19 @@ def main():
         f.write("DETECT ISSUES - COST REPORT\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"Model: {model_name}\n")
-        f.write(f"Database: {data_dir}\n")
+        f.write(f"Dataset: {dataset_dir}\n")
+        f.write(f"XLSX: {xlsx_path.name}\n")
         f.write(f"Examples dir: {args.use_examples or 'None'}\n")
-        if hard_examples:
-            f.write(f"Hard examples: {len(hard_examples)}\n")
-        f.write(f"Processed: {processed_count} entries\n")
-        f.write(f"Skipped: {skipped_count} entries\n\n")
+        if examples:
+            total_ex = sum(len(imgs) for imgs in examples.values())
+            f.write(f"Examples: {total_ex} images from {len(examples)} categories\n")
+            for cat, imgs in examples.items():
+                f.write(f"  {cat}: {len(imgs)} images\n")
+        f.write(f"Total venues: {total_items}\n")
+        f.write(f"  Found in dataset: {found_count}\n")
+        f.write(f"  Not in dataset: {not_found_count}\n")
+        f.write(f"Processed (Gemini): {processed_count} venues\n")
+        f.write(f"Skipped/N/A: {skipped_count} venues\n\n")
         f.write("TOKEN USAGE:\n")
         f.write(f"  Input tokens:    {total_input_tokens:,}\n")
         f.write(f"  Thinking tokens: {total_thinking_tokens:,}\n")

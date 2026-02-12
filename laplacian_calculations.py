@@ -140,6 +140,9 @@ def process_entry(venue_id, event_id, focus_folder, tolerance):
     focus_json_path = focus_folder / 'focus.json'
     status, details = validate_against_json(metrics, focus_json_path, tolerance)
 
+    joined_path = focus_folder / 'joined_0_1.jpg'
+    joined_image = f'=HYPERLINK("file:///{joined_path.resolve()}")' if joined_path.exists() else ''
+
     return {
         'venue_id': venue_id,
         'event_id': event_id,
@@ -151,6 +154,7 @@ def process_entry(venue_id, event_id, focus_folder, tolerance):
         'focus_abs_dif_rel': metrics['focus_abs_dif_rel'],
         'validation_status': status,
         'validation_details': details,
+        'joined_image': joined_image,
     }
 
 
@@ -210,7 +214,8 @@ def main():
         'focus_left_mid',
         'focus_abs_dif_rel',
         'validation_status',
-        'validation_details'
+        'validation_details',
+        'joined_image'
     ]
 
     # Collect all focus folders first for progress tracking
@@ -257,6 +262,7 @@ def main():
                     'focus_abs_dif_rel': result['focus_abs_dif_rel'],
                     'validation_status': result['validation_status'],
                     'validation_details': result['validation_details'],
+                    'joined_image': result['joined_image'],
                 }
                 writer.writerow(row)
                 processed += 1

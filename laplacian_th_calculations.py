@@ -86,11 +86,6 @@ def main():
         output_path = str(output_dir / "laplacian_th_calculations.csv")
 
     try:
-        # Count total rows first for progress
-        with open(args.input_csv, 'r', newline='') as infile:
-            total_rows = sum(1 for _ in infile) - 1  # subtract header
-        print(f'Found {total_rows} rows to process.')
-
         with open(args.input_csv, 'r', newline='') as infile:
             reader = csv.DictReader(infile)
 
@@ -105,10 +100,6 @@ def main():
                 total = 0
 
                 for row in reader:
-                    total += 1
-                    if total % 1000 == 0 or total == total_rows:
-                        print(f'  Processing {total}/{total_rows} ({total * 100 // total_rows}%)', flush=True)
-
                     # Parse values
                     focus_right_mean = float(row['focus_right_mean'])
                     focus_left_mean = float(row['focus_left_mean'])
@@ -127,6 +118,7 @@ def main():
                     writer.writerow(row)
 
                     counts[severity] += 1
+                    total += 1
 
     except FileNotFoundError:
         print(f'Error: {args.input_csv} not found', file=sys.stderr)

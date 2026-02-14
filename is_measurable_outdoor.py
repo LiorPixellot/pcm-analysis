@@ -29,12 +29,15 @@ if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
 from google import genai
 from google.genai import types
 
+from PIL import Image
+
 from is_measurable import (
     load_config,
     load_venues,
     load_model_pricing,
     calculate_pricing,
     get_token_usage,
+    pil_to_bytes,
     load_images,
 )
 
@@ -58,7 +61,7 @@ Answer "No" for is_measurable if you see ANY of these:
 - SNOW: Snow covering the playing surface MASSIVELY (white/bright field, heavy snow accumulation on the playing area). Light dusting or snow only outside field boundaries does NOT affect measurability.
 
 **Visibility issues:**
-- Object blocking or obstructing the camera view (lens covered, equipment in front, etc.)
+- Object blocking or obstructing the camera view too much such that field can't be seen (lens covered, equipment in front, etc.)
 - Lens heavily dirty or obscured
 
 **NOT a reason for "No":** Condensation/moisture ON the lens — this is still measurable but is a quality issue.
@@ -77,10 +80,65 @@ Rules:
 - Return ONLY valid JSON, no markdown formatting or extra text"""
 
 
+EXAMPLE_SUN_LABEL = """This is an example of direct sunlight hitting the camera lens. The severe glare and flare artifacts make focus measurement impossible.
+Expected response: {"observation": "Direct sun on camera lens causing severe glare", "is_measurable": "No", "reason": "Sun directed at camera — glare prevents reliable measurement"}"""
+
+EXAMPLE_SNOW_LABEL = """This is an example of massive snow covering the entire playing field. The field is uniformly white with heavy snow accumulation — this prevents focus measurement.
+Expected response: {"observation": "Heavy snow fully covers the playing field", "is_measurable": "No", "reason": "Snow massively covers the field — insufficient contrast for measurement"}"""
+
+EXAMPLE_DARK_LABEL = """This is an example of an outdoor venue where the main field lights are OFF. Even though some ambient light is visible, the field itself is too dark for reliable focus measurement.
+Expected response: {"observation": "Main field lights are off — only ambient light visible", "is_measurable": "No", "reason": "Field lights off — ambient light insufficient for measurement"}"""
+
+EXAMPLE_SMALL_SNOW_LABEL = """This is an example of snow around the venue (track, surroundings) but the playing field itself is clearly visible and NOT covered by snow. This IS measurable — light snow outside the field does not prevent focus measurement.
+Expected response: {"observation": "Snow on surrounding track and grounds, but playing field is clear and fully visible", "is_measurable": "Yes", "reason": ""}"""
+
+# Ordered list of (subdirectory_name, section_title, label_constant, is_positive)
+EXAMPLE_CATEGORIES = [
+    ("outdoor_sun", "Direct sun on camera", EXAMPLE_SUN_LABEL, False),
+    ("outdor_snow", "Snow covering field", EXAMPLE_SNOW_LABEL, False),
+    ("outdor_dark", "Dark field with ambient light", EXAMPLE_DARK_LABEL, False),
+    ("outdor_small_snow", "Snow around venue but field is clear", EXAMPLE_SMALL_SNOW_LABEL, True),
+]
+
+
+def load_examples(examples_dir: Path = None) -> Dict[str, list]:
+    """Load example images from categorized subdirectories.
+
+    Returns dict keyed by category name, each value a list of image bytes.
+    """
+    if examples_dir is None:
+        examples_dir = Path(__file__).parent.resolve() / "examples"
+
+    examples: Dict[str, list] = {}
+    if not examples_dir.is_dir():
+        print(f"  Warning: examples directory not found: {examples_dir}")
+        return examples
+
+    for category, _, _, _ in EXAMPLE_CATEGORIES:
+        cat_dir = examples_dir / category
+        if not cat_dir.is_dir():
+            print(f"  Warning: example category dir not found: {cat_dir}")
+            continue
+
+        images = []
+        for img_path in sorted(cat_dir.glob("*.jpg")) + sorted(cat_dir.glob("*.png")):
+            try:
+                img_bytes = pil_to_bytes(Image.open(img_path))
+                images.append(img_bytes)
+            except Exception as e:
+                print(f"  Warning: failed to load example {img_path.name}: {e}")
+
+        if images:
+            examples[category] = images
+
+    return examples
+
+
 def analyze_outdoor(client: genai.Client, model_name: str,
                     cam0_bytes: bytes, cam1_bytes: bytes,
                     joined_bytes: Optional[bytes] = None,
-                    media_resolution: Optional[str] = None) -> Tuple[dict, dict]:
+                    media_resolution: Optional[str] = None,
+                    examples: Optional[Dict[str, list]] = None) -> Tuple[dict, dict]:
     """Analyze outdoor venue images for measurability.
 
     Returns (result_dict, token_usage_dict).
@@ -90,6 +148,36 @@ def analyze_outdoor(client: genai.Client, model_name: str,
         image_kwargs["media_resolution"] = media_resolution
 
     parts = [types.Part.from_text(text=OUTDOOR_PROMPT)]
+
+    # Insert categorized examples
+    if examples:
+        # Negative examples (NOT measurable)
+        negative = [(c, t, l) for c, t, l, pos in EXAMPLE_CATEGORIES if not pos and c in examples]
+        if negative:
+            parts.append(types.Part.from_text(
+                text="\n\nReference examples of conditions that are NOT measurable:"
+            ))
+            for category, title, label in negative:
+                parts.append(types.Part.from_text(text=f"\nExample — {title}:"))
+                for img_bytes in examples[category]:
+                    parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=img_bytes, **image_kwargs))
+                parts.append(types.Part.from_text(text=label))
+
+        # Positive examples (IS measurable)
+        positive = [(c, t, l) for c, t, l, pos in EXAMPLE_CATEGORIES if pos and c in examples]
+        if positive:
+            parts.append(types.Part.from_text(
+                text="\n\nReference examples of conditions that ARE measurable:"
+            ))
+            for category, title, label in positive:
+                parts.append(types.Part.from_text(text=f"\nExample — {title}:"))
+                for img_bytes in examples[category]:
+                    parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=img_bytes, **image_kwargs))
+                parts.append(types.Part.from_text(text=label))
+
+        parts.append(types.Part.from_text(
+            text="\n\nNow analyze the following venue images:"
+        ))
 
     parts.append(types.Part.from_text(text="CAM0 (right camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam0_bytes, **image_kwargs))
@@ -187,7 +275,8 @@ def scan_database(data_dir: Path, venue_filter: Optional[set] = None):
 
 
 def process_entry(index: int, entry: dict, client: genai.Client, model_name: str,
-                  media_resolution: Optional[str] = None) -> dict:
+                  media_resolution: Optional[str] = None,
+                  examples: Optional[Dict[str, list]] = None) -> dict:
     """Load images and call analyze_outdoor. Used as parallel worker."""
     venue_id = entry["venue_id"]
     event_id = entry["event_id"]
@@ -212,6 +301,7 @@ def process_entry(index: int, entry: dict, client: genai.Client, model_name: str
     try:
         result, token_usage = analyze_outdoor(
             client, model_name, cam0_bytes, cam1_bytes, joined_bytes, media_resolution,
+            examples,
         )
 
         result_row["is_measurable"] = result.get("is_measurable", "Unknown")
@@ -281,7 +371,6 @@ def main():
         print(f"  Media resolution: {media_resolution}")
     if args.limit:
         print(f"  Limit: {args.limit}")
-    print("=" * 60)
 
     if not entries:
         print("  No entries found. Exiting.")
@@ -304,6 +393,14 @@ def main():
         ),
     )
 
+    # Load few-shot examples
+    examples = load_examples()
+    total_example_images = sum(len(imgs) for imgs in examples.values())
+    print(f"  Examples loaded: {total_example_images} images from {len(examples)} categories")
+    for category, imgs in examples.items():
+        print(f"    {category}: {len(imgs)} images")
+    print("=" * 60)
+
     total_input_tokens = 0
     total_output_tokens = 0
     total_thinking_tokens = 0
@@ -320,7 +417,7 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
-            executor.submit(process_entry, i, entry, client, model_name, media_resolution): i
+            executor.submit(process_entry, i, entry, client, model_name, media_resolution, examples): i
             for i, entry in enumerate(entries)
         }
 

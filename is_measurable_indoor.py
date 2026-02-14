@@ -29,12 +29,15 @@ if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
 from google import genai
 from google.genai import types
 
+from PIL import Image
+
 from is_measurable import (
     load_config,
     load_venues,
     load_model_pricing,
     calculate_pricing,
     get_token_usage,
+    pil_to_bytes,
     load_images,
 )
 
@@ -73,10 +76,57 @@ Rules:
 - Return ONLY valid JSON, no markdown formatting or extra text"""
 
 
+EXAMPLE_DARK_FIELD_LABEL = """This is an example of an indoor venue where the main arena lights are OFF. Even though some ambient light and window light create shadows and partial visibility, the lighting is NOT sufficient for reliable focus measurement. If the main overhead lights are clearly off, it is not measurable.
+Expected response: {"observation": "Main arena lights are off — only ambient/window light visible", "is_measurable": "No", "reason": "Main lights off — ambient light insufficient for measurement"}"""
+
+EXAMPLE_NORMAL_LIGHT_LABEL = """This is an example of an indoor venue with normal lighting conditions. The main arena lights are ON and the playing surface is clearly visible. This IS measurable.
+Expected response: {"observation": "Indoor venue with main lights on — court/field clearly visible", "is_measurable": "Yes", "reason": ""}"""
+
+# Ordered list of (subdirectory_name, section_title, label_constant, is_positive)
+EXAMPLE_CATEGORIES = [
+    ("indor_dark_field", "Indoor dark field (lights off)", EXAMPLE_DARK_FIELD_LABEL, False),
+    ("indor_normal_light", "Indoor normal lighting", EXAMPLE_NORMAL_LIGHT_LABEL, True),
+]
+
+
+def load_examples(examples_dir: Path = None) -> Dict[str, list]:
+    """Load example images from categorized subdirectories.
+
+    Returns dict keyed by category name, each value a list of image bytes.
+    """
+    if examples_dir is None:
+        examples_dir = Path(__file__).parent.resolve() / "examples"
+
+    examples: Dict[str, list] = {}
+    if not examples_dir.is_dir():
+        print(f"  Warning: examples directory not found: {examples_dir}")
+        return examples
+
+    for category, _, _, _ in EXAMPLE_CATEGORIES:
+        cat_dir = examples_dir / category
+        if not cat_dir.is_dir():
+            print(f"  Warning: example category dir not found: {cat_dir}")
+            continue
+
+        images = []
+        for img_path in sorted(cat_dir.glob("*.jpg")) + sorted(cat_dir.glob("*.png")):
+            try:
+                img_bytes = pil_to_bytes(Image.open(img_path))
+                images.append(img_bytes)
+            except Exception as e:
+                print(f"  Warning: failed to load example {img_path.name}: {e}")
+
+        if images:
+            examples[category] = images
+
+    return examples
+
+
 def analyze_indoor(client: genai.Client, model_name: str,
                    cam0_bytes: bytes, cam1_bytes: bytes,
                    joined_bytes: Optional[bytes] = None,
-                   media_resolution: Optional[str] = None) -> Tuple[dict, dict]:
+                   media_resolution: Optional[str] = None,
+                   examples: Optional[Dict[str, list]] = None) -> Tuple[dict, dict]:
     """Analyze indoor venue images for measurability.
 
     Returns (result_dict, token_usage_dict).
@@ -86,6 +136,34 @@ def analyze_indoor(client: genai.Client, model_name: str,
         image_kwargs["media_resolution"] = media_resolution
 
     parts = [types.Part.from_text(text=INDOOR_PROMPT)]
+
+    # Insert categorized examples
+    if examples:
+        negative = [(c, t, l) for c, t, l, pos in EXAMPLE_CATEGORIES if not pos and c in examples]
+        if negative:
+            parts.append(types.Part.from_text(
+                text="\n\nReference examples of conditions that are NOT measurable:"
+            ))
+            for category, title, label in negative:
+                parts.append(types.Part.from_text(text=f"\nExample — {title}:"))
+                for img_bytes in examples[category]:
+                    parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=img_bytes, **image_kwargs))
+                parts.append(types.Part.from_text(text=label))
+
+        positive = [(c, t, l) for c, t, l, pos in EXAMPLE_CATEGORIES if pos and c in examples]
+        if positive:
+            parts.append(types.Part.from_text(
+                text="\n\nReference examples of conditions that ARE measurable:"
+            ))
+            for category, title, label in positive:
+                parts.append(types.Part.from_text(text=f"\nExample — {title}:"))
+                for img_bytes in examples[category]:
+                    parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=img_bytes, **image_kwargs))
+                parts.append(types.Part.from_text(text=label))
+
+        parts.append(types.Part.from_text(
+            text="\n\nNow analyze the following venue images:"
+        ))
 
     parts.append(types.Part.from_text(text="CAM0 (right camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam0_bytes, **image_kwargs))
@@ -183,7 +261,8 @@ def scan_database(data_dir: Path, venue_filter: Optional[set] = None):
 
 
 def process_entry(index: int, entry: dict, client: genai.Client, model_name: str,
-                  media_resolution: Optional[str] = None) -> dict:
+                  media_resolution: Optional[str] = None,
+                  examples: Optional[Dict[str, list]] = None) -> dict:
     """Load images and call analyze_indoor. Used as parallel worker."""
     venue_id = entry["venue_id"]
     event_id = entry["event_id"]
@@ -208,6 +287,7 @@ def process_entry(index: int, entry: dict, client: genai.Client, model_name: str
     try:
         result, token_usage = analyze_indoor(
             client, model_name, cam0_bytes, cam1_bytes, joined_bytes, media_resolution,
+            examples,
         )
 
         result_row["is_measurable"] = result.get("is_measurable", "Unknown")
@@ -277,7 +357,6 @@ def main():
         print(f"  Media resolution: {media_resolution}")
     if args.limit:
         print(f"  Limit: {args.limit}")
-    print("=" * 60)
 
     if not entries:
         print("  No entries found. Exiting.")
@@ -300,6 +379,14 @@ def main():
         ),
     )
 
+    # Load few-shot examples
+    examples = load_examples()
+    total_example_images = sum(len(imgs) for imgs in examples.values())
+    print(f"  Examples loaded: {total_example_images} images from {len(examples)} categories")
+    for category, imgs in examples.items():
+        print(f"    {category}: {len(imgs)} images")
+    print("=" * 60)
+
     total_input_tokens = 0
     total_output_tokens = 0
     total_thinking_tokens = 0
@@ -316,7 +403,7 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
-            executor.submit(process_entry, i, entry, client, model_name, media_resolution): i
+            executor.submit(process_entry, i, entry, client, model_name, media_resolution, examples): i
             for i, entry in enumerate(entries)
         }
 

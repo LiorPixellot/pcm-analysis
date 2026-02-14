@@ -39,8 +39,8 @@ from is_measurable import (
     get_token_usage,
     load_images,
 )
-from is_measurable_indoor import analyze_indoor
-from is_measurable_outdoor import analyze_outdoor
+from is_measurable_indoor import analyze_indoor, load_examples as load_indoor_examples
+from is_measurable_outdoor import analyze_outdoor, load_examples as load_outdoor_examples
 
 
 # Calibration types that indicate an indoor venue (case-insensitive)
@@ -114,7 +114,9 @@ def find_venue_focus_dir(dataset_dir: Path, venue_id: str) -> Optional[Path]:
 
 def process_venue(index: int, venue_row: dict, venue_type: str,
                   focus_dir: Path, client: genai.Client, model_name: str,
-                  media_resolution: Optional[str] = None) -> dict:
+                  media_resolution: Optional[str] = None,
+                  indoor_examples: Optional[dict] = None,
+                  outdoor_examples: Optional[dict] = None) -> dict:
     """Load images and call the appropriate analyzer. Used as parallel worker."""
     venue_id = str(venue_row.get("PIXELLOT_VENUE_ID", ""))
 
@@ -136,10 +138,12 @@ def process_venue(index: int, venue_row: dict, venue_type: str,
         if venue_type == "indoor":
             result, token_usage = analyze_indoor(
                 client, model_name, cam0_bytes, cam1_bytes, None, media_resolution,
+                indoor_examples,
             )
         else:
             result, token_usage = analyze_outdoor(
                 client, model_name, cam0_bytes, cam1_bytes, None, media_resolution,
+                outdoor_examples,
             )
 
         is_measurable = result.get("is_measurable", "Unknown")
@@ -274,7 +278,6 @@ def main():
         print(f"  Media resolution: {media_resolution}")
     if args.limit:
         print(f"  Limit: {args.limit}")
-    print("=" * 60)
 
     if not work_items:
         print("  No venues to process. Exiting.")
@@ -297,6 +300,19 @@ def main():
             )
         ),
     )
+
+    # Load few-shot examples for both analyzers
+    indoor_examples = load_indoor_examples()
+    outdoor_examples = load_outdoor_examples()
+    indoor_ex_count = sum(len(imgs) for imgs in indoor_examples.values())
+    outdoor_ex_count = sum(len(imgs) for imgs in outdoor_examples.values())
+    print(f"  Indoor examples: {indoor_ex_count} images from {len(indoor_examples)} categories")
+    for category, imgs in indoor_examples.items():
+        print(f"    {category}: {len(imgs)} images")
+    print(f"  Outdoor examples: {outdoor_ex_count} images from {len(outdoor_examples)} categories")
+    for category, imgs in outdoor_examples.items():
+        print(f"    {category}: {len(imgs)} images")
+    print("=" * 60)
 
     # Determine xlsx column names for output
     sample_row = venue_rows[0] if venue_rows else {}
@@ -346,6 +362,7 @@ def main():
                 future = executor.submit(
                     process_venue, wi, venue_row, venue_type, focus_dir,
                     client, model_name, media_resolution,
+                    indoor_examples, outdoor_examples,
                 )
                 future_to_wi[future] = (wi, venue_row, venue_type)
 

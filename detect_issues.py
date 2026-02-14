@@ -41,48 +41,56 @@ from is_measurable import (
 from run_is_measurable import read_blur_xlsx, find_venue_focus_dir
 
 
-DETECT_ISSUES_PROMPT = """You are analyzing camera images from a sports venue to detect issues.
+DETECT_ISSUES_PROMPT = """Analyze the following camera images for focus issues.
 
 The images are from a paired camera setup:
 - CAM0 = right camera
 - CAM1 = left camera
 - joined = side-by-side overlap composition (left half from CAM1, right half from CAM0)
 
-TASK: Check for issues: Focus / Object / None.
+FOCUS DETECTION — check for BOTH of these:
 
-IMPORTANT — Focus detection:
-A key indicator of a focus problem is a LARGE DIFFERENCE IN SHARPNESS between CAM0 and CAM1.
-Compare edges, field lines, text, and fine details between the two cameras. If one camera is
-noticeably sharper/crisper than the other, that is a focus issue. Use the joined overlap image
-to directly compare the same scene area from both cameras side by side.
+1. SHARPNESS DIFFERENCE BETWEEN CAMERAS:
+   Compare edges, field lines, text, and fine details between CAM0 and CAM1.
+   If one camera is noticeably sharper/crisper than the other, that is a focus issue.
+   Use the joined overlap image to directly compare the same scene area side by side.
 
-another key identicator 
-Identify segments in the video where there is a change in camera focus.
-Some areas appear sharp and clear, while other areas appear blurred or smoothed. Flag any transitions between sharp and soft focus.
+2. FOCUS TRANSITIONS WITHIN A SINGLE CAMERA:
+   Look for areas where sharpness changes within one frame — some areas sharp and
+   clear while others are blurred or smoothed. Flag any transitions between sharp
+   and soft focus.
 
 Return ONLY valid JSON with exactly this structure:
 {
-    "observation": "Brief description of what you see",
+    "observation": "Describe sharpness comparison between cameras and any focus transitions within each camera",
     "has_issue": "Yes" or "No",
-    "issue_type": "Focus" or "Object" or "None"
+    "issue_type": "Focus" or "None"
 }
 
 Rules:
-- If the field is too dark to analyze or field is covered havely by snow (not only on sides), set has_issue to "No" and issue_type to "None"
+- differences in exposure or color between cameras are NOT focus issues — only sharpness/blur differences count
+- If both cameras are equally soft or blurred, that is still a focus issue
 - Return ONLY valid JSON, no markdown formatting or extra text"""
 
 
-EXAMPLE_JOINED_LABEL = """This is an example of a joined image (left half = CAM1, right half = CAM0). Notice the difference in sharpness between the two cameras."""
+EXAMPLE_JOINED_LABEL = """This is an example of a joined image (left half = CAM1, right half = CAM0). Notice if there is difference in sharpness between the two cameras.
+Expected response: {"observation": "CAM0 side is noticeably sharper than CAM1 side in the overlap region", "has_issue": "Yes", "issue_type": "Focus"}"""
 
-EXAMPLE_CHANGE_FOCUS_LABEL = """This is an example of a change in camera focus. You can see the change inside the camera — some areas appear sharp while others are blurred or smoothed."""
+EXAMPLE_CHANGE_FOCUS_LABEL = """This is an example of a change in camera focus. You can see the change inside the frame — some areas appear sharp while others are blurred or smoothed.
+Expected response: {"observation": "Sharp-to-blurred transition visible within the frame", "has_issue": "Yes", "issue_type": "Focus"}"""
 
-EXAMPLE_COMPLETE_FOCUS_LABEL = """This is an example of a completely smoothed camera with bad focus all over the lens. The entire image lacks sharpness."""
+EXAMPLE_COMPLETE_FOCUS_LABEL = """This is an example of a completely smoothed camera with bad focus all over the lens. The entire image lacks sharpness.
+Expected response: {"observation": "Entire image lacks sharpness — complete focus failure across the lens", "has_issue": "Yes", "issue_type": "Focus"}"""
+
+EXAMPLE_NORMAL_LABEL = """This is an example of normal cameras with no focus issues. Notice that the colors and exposure differ between CAM0 and CAM1 — this is NOT a focus problem. What matters is sharpness: both cameras show crisp edges, sharp field lines, and clear details. Color or brightness differences alone do not indicate a focus issue.
+Expected response: {"observation": "Both cameras show sharp edges and clear details — no focus issue", "has_issue": "No", "issue_type": "None"}"""
 
 # Ordered list of (subdirectory_name, section_title, label_constant)
 EXAMPLE_CATEGORIES = [
     ("joined", "Joined image (sharpness difference between cameras)", EXAMPLE_JOINED_LABEL),
     ("change_focus", "Change in camera focus", EXAMPLE_CHANGE_FOCUS_LABEL),
     ("complete_focus", "Complete focus problem", EXAMPLE_COMPLETE_FOCUS_LABEL),
+    ("normal", "Normal cameras (no issue)", EXAMPLE_NORMAL_LABEL),
 ]
 
 
@@ -167,6 +175,7 @@ def analyze_venue(client: genai.Client, model_name: str,
         top_p=0.95,
         max_output_tokens=65536,
         labels={"job": "detect-issues", "pipeline": "pcm"},
+        system_instruction="You are an expert camera quality analyst for sports venues.",
     )
 
     response = client.models.generate_content(

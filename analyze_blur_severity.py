@@ -163,6 +163,9 @@ def main():
         df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} rows from {csv_path}")
 
+    # pandas reads the string "NA" as NaN — restore it so groupby includes NA severity
+    df["Focus_severity"] = df["Focus_severity"].fillna("NA")
+
     # Filter to rows with blur data
     df_blur = df.dropna(subset=["AVERAGE_BLUR_AVG"]).copy()
     print(f"Rows with AVERAGE_BLUR_AVG data: {len(df_blur)}")

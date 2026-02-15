@@ -273,7 +273,7 @@ Venues where zoom could help have a **2.9pp lower Error rate** (17.1% vs 20.0%).
 ### Key insights
 
 1. **~24% of all errors are potentially fixable by remote zoom adjustment** (465 venues) — these are the quick wins that don't require a technician visit.
-2. **~64% of errors cannot be fixed by zooming** (1,249 venues) — these need physical intervention (lens cleaning, mounting adjustment, recalibration, or full setup redo).
+2. **~64% of errors cannot be fixed by zooming** (1,249 venues) — these need physical intervention ( mounting adjustment, recalibration, or full setup redo).
 3. **Mode 3 has the lowest error rate** (16.7%) and mode 5 the highest (22.2%) — a 5.5pp spread between best and worst camera configurations.
 4. **Zoom=Yes + mode=-1 is the healthiest combo** (10.0% Error) — invalid/uncalculated setups with balanced spares rarely have focus problems, suggesting simple installations work well.
 5. **Zoom=No + mode=5 is the most problematic** (24.1% Error) — these venues have the worst geometry and can't fix it by zooming.

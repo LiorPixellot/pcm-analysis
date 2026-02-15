@@ -4,7 +4,7 @@
 data_dir: "test_set_combined"  # Default data directory for analysis
 
 # Model settings
-model: "gemini-3-pro-preview"  # Pro model for higher quality analysis
+model: "gemini-3-flash-preview"  # Pro model for higher quality analysis
 temperature: 0  # Deterministic output
 top_p: 0.95
 #media_resolution: "MEDIA_RESOLUTION_ULTRA_HIGH"

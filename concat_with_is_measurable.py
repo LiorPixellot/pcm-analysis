@@ -69,6 +69,9 @@ def main():
         print(f'Error: {args.blur_xlsx} missing venue_id column', file=sys.stderr)
         sys.exit(1)
 
+    # Find Focus_severity column index (for override when not measurable)
+    severity_col = blur_headers.index('Focus_severity') if 'Focus_severity' in blur_headers else None
+
     # Append new column headers
     base_cols = len(blur_headers)
     for i, field in enumerate(measurable_fields):
@@ -85,6 +88,8 @@ def main():
             for i, col in enumerate(measurable_fields):
                 ws_in.cell(row=row_idx, column=base_cols + 1 + i,
                            value=measurable_lookup[vid].get(col, ''))
+            if severity_col is not None and measurable_lookup[vid].get('is_measurable', '').lower() == 'no':
+                ws_in.cell(row=row_idx, column=severity_col + 1, value='NA')
             matched += 1
         else:
             for i in range(len(measurable_fields)):

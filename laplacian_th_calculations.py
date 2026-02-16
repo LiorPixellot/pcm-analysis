@@ -10,30 +10,6 @@ from datetime import datetime
 from pathlib import Path
 
 
-def worst_severity(a, b):
-    """Return the worse severity (higher rank = worse)."""
-    rank = {"Ok": 0, "Warning": 1, "Error": 2}
-    if rank[a] >= rank[b]:
-        return a
-    return b
-
-
-def mid_severity(mid):
-    """
-    Calculate severity from mid focus value.
-    Error: 0 <= mid <= 10
-    Warning: 10 < mid <= 20
-    Ok: mid > 20
-    """
-    if mid < 0:
-        return "Error"
-    if mid <= 10:
-        return "Error"
-    if mid <= 20:
-        return "Warning"
-    return "Ok"
-
-
 def calc_focus_severity(focus_right_mean, focus_left_mean,
                         focus_abs_dif_rel,
                         focus_right_mid, focus_left_mid):
@@ -42,25 +18,29 @@ def calc_focus_severity(focus_right_mean, focus_left_mean,
 
     Returns one of: "NA", "Ok", "Warning", "Error"
     """
-    # 1) NA gate: either mean < 70
-    if focus_right_mean < 70 or focus_left_mean < 70:
+    # NA: too dark to trust Laplacian values
+    if min(focus_right_mean, focus_left_mean) < 50:
         return "NA"
 
-    # 2) Severity from abs_dif_rel
-    if focus_abs_dif_rel > 1.25:
-        sev_diff = "Error"
-    elif focus_abs_dif_rel >= 0.7:
-        sev_diff = "Warning"
-    else:
-        sev_diff = "Ok"
+    avg_mean = (focus_right_mean + focus_left_mean) / 2
+    min_mid = min(focus_right_mid, focus_left_mid)
+    max_mid = max(focus_right_mid, focus_left_mid)
 
-    # 3) Severity from mid values (per-side, then worst)
-    sev_mid_right = mid_severity(focus_right_mid)
-    sev_mid_left = mid_severity(focus_left_mid)
-    sev_mid = worst_severity(sev_mid_right, sev_mid_left)
+    # Error (any triggers):
+    if focus_abs_dif_rel > 1.0:          # large diff between cameras
+        return "Error"
+    if min_mid <= 15:                     # one camera very blurry
+        return "Error"
+    if avg_mean < 95 and min_mid <= 25:   # dark + bad mid
+        return "Error"
+    if max_mid <= 50 and avg_mean < 100:  # both cameras bad
+        return "Error"
 
-    # 4) Final = worst of diff and mid severities
-    return worst_severity(sev_diff, sev_mid)
+    # Warning:
+    if focus_abs_dif_rel >= 0.5 or min_mid <= 25:
+        return "Warning"
+
+    return "Ok"
 
 
 def main():

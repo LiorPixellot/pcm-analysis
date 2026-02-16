@@ -12,6 +12,7 @@ Run the full analysis pipeline:
 Usage:
     python run_full_pipeline.py <data_dir> <blur_xlsx>
     python run_full_pipeline.py <data_dir> <blur_xlsx> --is-measurable-csv <path>
+    python run_full_pipeline.py <data_dir> <blur_xlsx> --detect-issues-csv <path>
     python run_full_pipeline.py <data_dir> <blur_xlsx> --examples-dir examples/
 """
 
@@ -35,6 +36,8 @@ def main():
                         help='Limit number of venues for run_is_measurable.py')
     parser.add_argument('--output-dir', default=None,
                         help='Master output directory. If omitted, creates output_dir/YYYY-MM-DD_HH-MM/')
+    parser.add_argument('--detect-issues-csv', default=None,
+                        help='Pre-computed detect_issues CSV (skip detect_issues.py)')
     parser.add_argument('--examples-dir', default=None,
                         help='Examples directory for detect_issues.py (passed as --use-examples)')
     args = parser.parse_args()
@@ -50,6 +53,10 @@ def main():
 
     if args.is_measurable_csv and not Path(args.is_measurable_csv).exists():
         print(f"Error: is_measurable_csv not found: {args.is_measurable_csv}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.detect_issues_csv and not Path(args.detect_issues_csv).exists():
+        print(f"Error: detect_issues_csv not found: {args.detect_issues_csv}", file=sys.stderr)
         sys.exit(1)
 
     # Create master output directory
@@ -156,27 +163,31 @@ def main():
     print(f"Step 4 output: {step4_csv}\n")
 
     # Step 5: Detect issues
-    print("=" * 60)
-    print("Step 5: Running detect_issues.py")
-    print("=" * 60)
-    cmd = [python, '-u', str(script_dir / 'detect_issues.py'),
-           '--dataset', args.data_dir, '--blur-xlsx', args.blur_xlsx,
-           '--output-dir', output_dir_str]
-    if args.limit:
-        cmd += ['--limit', str(args.limit)]
-    if args.examples_dir:
-        cmd += ['--use-examples', args.examples_dir]
-    step5 = subprocess.run(cmd)
-    if step5.returncode != 0:
-        print("Step 5 failed, aborting.", file=sys.stderr)
-        sys.exit(1)
+    if args.detect_issues_csv:
+        detect_issues_csv = args.detect_issues_csv
+        print(f"Using pre-computed detect_issues CSV: {detect_issues_csv}\n")
+    else:
+        print("=" * 60)
+        print("Step 5: Running detect_issues.py")
+        print("=" * 60)
+        cmd = [python, '-u', str(script_dir / 'detect_issues.py'),
+               '--dataset', args.data_dir, '--blur-xlsx', args.blur_xlsx,
+               '--output-dir', output_dir_str]
+        if args.limit:
+            cmd += ['--limit', str(args.limit)]
+        if args.examples_dir:
+            cmd += ['--use-examples', args.examples_dir]
+        step5 = subprocess.run(cmd)
+        if step5.returncode != 0:
+            print("Step 5 failed, aborting.", file=sys.stderr)
+            sys.exit(1)
 
-    detect_issues_csv = str(master_output_dir / 'detect_issues' / 'detect_issues.csv')
-    if not Path(detect_issues_csv).exists():
-        print(f"Error: {detect_issues_csv} not found.", file=sys.stderr)
-        sys.exit(1)
+        detect_issues_csv = str(master_output_dir / 'detect_issues' / 'detect_issues.csv')
+        if not Path(detect_issues_csv).exists():
+            print(f"Error: {detect_issues_csv} not found.", file=sys.stderr)
+            sys.exit(1)
 
-    print(f"Step 5 output: {detect_issues_csv}\n")
+        print(f"Step 5 output: {detect_issues_csv}\n")
 
     # Step 6: Concat detect_issues data
     print("=" * 60)

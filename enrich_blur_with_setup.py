@@ -58,27 +58,54 @@ def find_venue_setup_json(dataset_dir: Path, venue_id: str) -> Optional[Path]:
     return None
 
 
-def extract_max_setup(setup_json_path: Path) -> tuple[Optional[dict], bool]:
-    """Parse setup.json and return (entry, used_fallback).
+def extract_max_setup(setup_json_path: Path) -> tuple[Optional[dict], bool, str]:
+    """Parse setup.json and return (entry, used_fallback, setup_joined_image).
 
     First tries the entry with max_field_area='MAX'. If none found, falls back
-    to the entry with the largest field_area. Returns (None, False) only if the
+    to the entry with the largest field_area. Returns (None, False, '') only if the
     setups array is empty.
     """
     with open(setup_json_path) as f:
         data = json.load(f)
 
+    setup_joined_image = data.get("setup_joined_image", "")
+
     setups = data.get("setups", [])
     if not setups:
-        return None, False
+        return None, False, setup_joined_image
 
     for entry in setups:
         if entry.get("max_field_area") == "MAX":
-            return entry, False
+            return entry, False, setup_joined_image
 
     # Fallback: pick entry with the largest field_area
     best = max(setups, key=lambda e: e.get("field_area", 0))
-    return best, True
+    return best, True, setup_joined_image
+
+
+def compute_can_improve_by_zoom(left_spare, right_spare, max_camera_overlap) -> str:
+    """Return 'Yes' if avg spare / overlap ratio is in [0.7, 1.3], else 'No'. Empty on bad data."""
+    try:
+        ls = float(left_spare)
+        rs = float(right_spare)
+        mco = float(max_camera_overlap)
+    except (ValueError, TypeError):
+        return ""
+    if mco == 0:
+        return ""
+    ratio = (ls + rs) / mco / 2
+    return "Yes" if 0.7 <= ratio <= 1.3 else "No"
+
+
+def compute_decision(setup_severity: str, can_improve_by_zoom: str) -> str:
+    """Derive action decision from setup severity and zoom improvability."""
+    if setup_severity == "Error":
+        return "maintain_remote" if can_improve_by_zoom == "Yes" else "maintain_on_site"
+    if setup_severity == "Warning":
+        return "watch"
+    if setup_severity == "Ok":
+        return "ok"
+    return "NA"
 
 
 def compute_setup_severity(all_spares) -> str:
@@ -122,7 +149,12 @@ def main():
         print("No data rows found in xlsx")
         return
 
-    new_columns = ["setup_sport_type", "max_camera_overlap", "all_spares", "setup_severity"]
+    new_columns = [
+        "setup_sport_type", "max_camera_overlap", "all_spares", "setup_severity",
+        "left_spare", "right_spare", "s2_mode_calc", "X_of_center", "Y_from_line",
+        "height", "focals_diff", "cam_angle_diff", "can_improve_by_zoom", "decision",
+        "setup_join_image",
+    ]
     print(f"Read {len(rows)} rows from {xlsx_path}")
     print(f"Looking up setup.json in {dataset_dir}/")
 
@@ -139,6 +171,7 @@ def main():
             for col in new_columns:
                 row[col] = ""
             row["setup_severity"] = "Aborted"
+            row["decision"] = "NA"
             empty_venue_id += 1
             continue
 
@@ -147,6 +180,7 @@ def main():
             for col in new_columns:
                 row[col] = ""
             row["setup_severity"] = "Aborted"
+            row["decision"] = "NA"
             venue_dir = dataset_dir / venue_id
             if not venue_dir.is_dir():
                 no_venue_dir += 1
@@ -154,11 +188,13 @@ def main():
                 no_setup_json += 1
             continue
 
-        max_entry, used_fallback = extract_max_setup(setup_json_path)
+        max_entry, used_fallback, setup_joined_image = extract_max_setup(setup_json_path)
         if max_entry is None:
             for col in new_columns:
                 row[col] = ""
             row["setup_severity"] = "Aborted"
+            row["decision"] = "NA"
+            row["setup_join_image"] = setup_joined_image
             no_setups += 1
             continue
 
@@ -166,6 +202,19 @@ def main():
         row["max_camera_overlap"] = max_entry.get("max_camera_overlap", "")
         row["all_spares"] = max_entry.get("all_spares", "")
         row["setup_severity"] = compute_setup_severity(row["all_spares"])
+        row["left_spare"] = max_entry.get("left_spare", "")
+        row["right_spare"] = max_entry.get("right_spare", "")
+        row["s2_mode_calc"] = max_entry.get("s2_mode_calc", "")
+        row["X_of_center"] = max_entry.get("X_of_center", "")
+        row["Y_from_line"] = max_entry.get("Y_from_line", "")
+        row["height"] = max_entry.get("height", "")
+        row["focals_diff"] = max_entry.get("focals_diff", "")
+        row["cam_angle_diff"] = max_entry.get("cam_angle_diff", "")
+        row["can_improve_by_zoom"] = compute_can_improve_by_zoom(
+            row["left_spare"], row["right_spare"], row["max_camera_overlap"]
+        )
+        row["decision"] = compute_decision(row["setup_severity"], row["can_improve_by_zoom"])
+        row["setup_join_image"] = setup_joined_image
         if used_fallback:
             matched_fallback += 1
         else:

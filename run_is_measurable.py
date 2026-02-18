@@ -105,8 +105,10 @@ def find_venue_focus_dir(dataset_dir: Path, venue_id: str) -> Optional[Path]:
             continue
         focus_dir = event_path / "focus"
         if focus_dir.is_dir():
-            # Check that at least CAM0 and CAM1 exist
+            # Check that at least CAM0 and CAM1 exist (standard or _rot variants)
             if (focus_dir / "CAM0_1.jpg").exists() and (focus_dir / "CAM1_1.jpg").exists():
+                return focus_dir
+            if (focus_dir / "CAM0_1_rot.jpg").exists() and (focus_dir / "CAM1_1_rot.jpg").exists():
                 return focus_dir
 
     return None

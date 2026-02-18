@@ -296,14 +296,26 @@ def calculate_pricing(model_name: str, input_tokens: int, output_tokens: int, mo
     }
 
 
+def resolve_cam_paths(focus_dir: Path) -> Optional[Tuple[Path, Path]]:
+    """Resolve CAM0/CAM1 paths, falling back to _rot variants."""
+    cam0 = focus_dir / "CAM0_1.jpg"
+    cam1 = focus_dir / "CAM1_1.jpg"
+    if cam0.exists() and cam1.exists():
+        return cam0, cam1
+    cam0_rot = focus_dir / "CAM0_1_rot.jpg"
+    cam1_rot = focus_dir / "CAM1_1_rot.jpg"
+    if cam0_rot.exists() and cam1_rot.exists():
+        return cam0_rot, cam1_rot
+    return None
+
+
 def load_images(focus_dir: Path) -> Optional[Tuple[bytes, bytes, Optional[bytes]]]:
     """Load CAM0_1.jpg, CAM1_1.jpg, and optionally joined_0_1.jpg from the focus directory."""
-    cam0_path = focus_dir / "CAM0_1.jpg"
-    cam1_path = focus_dir / "CAM1_1.jpg"
-    joined_path = focus_dir / "joined_0_1.jpg"
-
-    if not cam0_path.exists() or not cam1_path.exists():
+    cam_paths = resolve_cam_paths(focus_dir)
+    if cam_paths is None:
         return None
+    cam0_path, cam1_path = cam_paths
+    joined_path = focus_dir / "joined_0_1.jpg"
 
     try:
         cam0_image = Image.open(cam0_path)

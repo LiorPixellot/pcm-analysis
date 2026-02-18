@@ -66,10 +66,16 @@ def main():
 
         # Write image hyperlink columns
         if focus_dir:
+            cam0_path = focus_dir / "CAM0_1.jpg"
+            if not cam0_path.exists():
+                cam0_path = focus_dir / "CAM0_1_rot.jpg"
+            cam1_path = focus_dir / "CAM1_1.jpg"
+            if not cam1_path.exists():
+                cam1_path = focus_dir / "CAM1_1_rot.jpg"
             images = {
                 "joined_image": focus_dir / "joined_0_1.jpg",
-                "cam0_image": focus_dir / "CAM0_1.jpg",
-                "cam1_image": focus_dir / "CAM1_1.jpg",
+                "cam0_image": cam0_path,
+                "cam1_image": cam1_path,
             }
             for col_name in image_cols:
                 col_idx = out_fieldnames.index(col_name) + 1

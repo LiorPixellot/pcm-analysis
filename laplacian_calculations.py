@@ -61,7 +61,9 @@ def process_focus_folder(focus_folder):
     """
     cam0_path = focus_folder / 'CAM0_1.jpg'
     cam1_path = focus_folder / 'CAM1_1.jpg'
-
+    if not cam0_path.exists() or not cam1_path.exists():
+        cam0_path = focus_folder / 'CAM0_1_rot.jpg'
+        cam1_path = focus_folder / 'CAM1_1_rot.jpg'
     if not cam0_path.exists() or not cam1_path.exists():
         return None
 

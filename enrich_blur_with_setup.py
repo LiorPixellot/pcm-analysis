@@ -228,8 +228,14 @@ def main():
     all_headers = headers + new_columns
     ws.append(all_headers)
 
-    for row in rows:
+    setup_join_col = all_headers.index("setup_join_image") + 1  # 1-based column
+    for row_idx, row in enumerate(rows, start=2):  # row 1 is header
         ws.append([row.get(h, "") for h in all_headers])
+        url = row.get("setup_join_image", "")
+        if url and isinstance(url, str) and url.startswith("http"):
+            cell = ws.cell(row=row_idx, column=setup_join_col)
+            cell.hyperlink = url
+            cell.style = "Hyperlink"
 
     wb.save(output_path)
     matched = matched_max + matched_fallback

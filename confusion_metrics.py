@@ -50,6 +50,16 @@ def severity_to_binary(val: str) -> str | None:
     return None  # NA or unrecognized → excluded
 
 
+def severity_error_only_to_binary(val: str) -> str | None:
+    """Map severity to binary: only ERROR → yes, OK/WARNING → no, NA → excluded."""
+    v = norm_severity(val)
+    if v == "ERROR":
+        return "yes"
+    if v in ("OK", "WARNING"):
+        return "no"
+    return None  # NA or unrecognized → excluded
+
+
 # ---------------------------------------------------------------------------
 # Binary metrics
 # ---------------------------------------------------------------------------
@@ -427,6 +437,59 @@ def main():
             sev_by_sheet[sheet] = prf_sub
 
     # ======================================================================
+    # 4. QUALITY ISSUE — LAPLACIAN ERROR ONLY (binary: only ERROR→yes, OK/WARNING→no)
+    # ======================================================================
+    sev_eo_binary_rows = []  # rows where severity maps to yes/no
+    sev_eo_na_rows = []      # rows where pred_severity is NA
+    for r in all_rows:
+        mapped = severity_error_only_to_binary(r.get("pred_severity", ""))
+        gt = norm_pred(r.get("gt_has_issue", ""))
+        if gt not in ("yes", "no"):
+            continue  # skip rows without valid GT
+        if mapped is None:
+            sev_eo_na_rows.append(r)
+        else:
+            r["_sev_eo_binary_pred"] = mapped
+            sev_eo_binary_rows.append(r)
+
+    gt_sev_eo_bin = [norm_pred(r["gt_has_issue"]) for r in sev_eo_binary_rows]
+    pred_sev_eo_bin = [r["_sev_eo_binary_pred"] for r in sev_eo_binary_rows]
+
+    cm_sev_eo = binary_confusion(gt_sev_eo_bin, pred_sev_eo_bin, positive="yes")
+    prf_sev_eo = prf(cm_sev_eo)
+
+    # NA breakdown
+    sev_eo_na_gt_yes = sum(1 for r in sev_eo_na_rows if norm_pred(r.get("gt_has_issue", "")) == "yes")
+    sev_eo_na_gt_no = len(sev_eo_na_rows) - sev_eo_na_gt_yes
+
+    # By venue type
+    sev_eo_by_type = {}
+    for vtype in ("indoor", "outdoor"):
+        subset = [(g, p) for r, g, p in zip(sev_eo_binary_rows, gt_sev_eo_bin, pred_sev_eo_bin)
+                  if str(r.get("Indoor / Outdoor", "")).strip().lower() == vtype]
+        if subset:
+            gt_sub, pred_sub = zip(*subset)
+            cm_sub = binary_confusion(gt_sub, pred_sub, positive="yes")
+            prf_sub = prf(cm_sub)
+            prf_sub["n"] = len(subset)
+            sev_eo_by_type[vtype] = prf_sub
+
+    # By source_sheet
+    sev_eo_by_sheet = {}
+    sheets = set(r.get("source_sheet", "") for r in sev_eo_binary_rows)
+    for sheet in sorted(sheets):
+        if not sheet:
+            continue
+        subset = [(g, p) for r, g, p in zip(sev_eo_binary_rows, gt_sev_eo_bin, pred_sev_eo_bin)
+                  if r.get("source_sheet", "") == sheet]
+        if subset:
+            gt_sub, pred_sub = zip(*subset)
+            cm_sub = binary_confusion(gt_sub, pred_sub, positive="yes")
+            prf_sub = prf(cm_sub)
+            prf_sub["n"] = len(subset)
+            sev_eo_by_sheet[sheet] = prf_sub
+
+    # ======================================================================
     # Text report
     # ======================================================================
     report_lines = []
@@ -484,6 +547,25 @@ def main():
     rprint(f"    Total: {len(sev_na_rows)} rows")
     rprint(f"    GT has_issue=yes: {sev_na_gt_yes}  (venues annotated as having issues but too dark to detect)")
     rprint(f"    GT has_issue=no:  {sev_na_gt_no}  (correctly unmeasurable)")
+
+    rprint("\n=== QUALITY ISSUE — LAPLACIAN ERROR ONLY ===")
+    rprint(f"Mapping: ERROR→yes, OK/WARNING→no, NA→excluded")
+    rprint(f"Evaluated: {len(sev_eo_binary_rows)} rows  |  NA excluded: {len(sev_eo_na_rows)}")
+    rprint(f"TP: {cm_sev_eo['tp']}  FP: {cm_sev_eo['fp']}  FN: {cm_sev_eo['fn']}  TN: {cm_sev_eo['tn']}")
+    rprint(f"Precision: {prf_sev_eo['precision']:.4f}  Recall: {prf_sev_eo['recall']:.4f}"
+           f"  F1: {prf_sev_eo['f1']:.4f}  Accuracy: {prf_sev_eo['accuracy']:.4f}")
+    rprint("\nBy venue type:")
+    for vtype, m in sorted(sev_eo_by_type.items()):
+        rprint(f"  {vtype.capitalize():8s}: P={m['precision']:.4f} R={m['recall']:.4f}"
+               f" F1={m['f1']:.4f} (N={m['n']})")
+    rprint("\nBy source_sheet:")
+    for sheet, m in sorted(sev_eo_by_sheet.items()):
+        rprint(f"  {sheet:20s}: P={m['precision']:.4f} R={m['recall']:.4f}"
+               f" F1={m['f1']:.4f} (N={m['n']})")
+    rprint(f"\n  NA (excluded — not measurable):")
+    rprint(f"    Total: {len(sev_eo_na_rows)} rows")
+    rprint(f"    GT has_issue=yes: {sev_eo_na_gt_yes}  (venues annotated as having issues but too dark to detect)")
+    rprint(f"    GT has_issue=no:  {sev_eo_na_gt_no}  (correctly unmeasurable)")
 
     rprint("\n" + "=" * 60)
 
@@ -581,6 +663,32 @@ def main():
                       "Quality Issue (Laplacian) — GT vs Predicted Distribution",
                       plots_dir / "severity_distribution.png")
 
+    # Quality Issue — Laplacian Error Only confusion matrix (2x2)
+    plot_binary_confusion(cm_sev_eo, "Quality Issue (Laplacian Error Only) Confusion Matrix",
+                          plots_dir / "severity_error_only_confusion.png")
+
+    sev_eo_prf_dict = {
+        "Yes (has issue)": {"precision": prf_sev_eo["precision"],
+                            "recall": prf_sev_eo["recall"],
+                            "f1": prf_sev_eo["f1"]},
+    }
+    tn, fp, fn, tp = cm_sev_eo["tn"], cm_sev_eo["fp"], cm_sev_eo["fn"], cm_sev_eo["tp"]
+    neg_prec = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+    neg_rec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    neg_f1 = 2 * neg_prec * neg_rec / (neg_prec + neg_rec) if (neg_prec + neg_rec) > 0 else 0.0
+    sev_eo_prf_dict["No (no issue)"] = {"precision": neg_prec, "recall": neg_rec, "f1": neg_f1}
+    plot_prf_bars(sev_eo_prf_dict, "Quality Issue (Laplacian Error Only) — Precision / Recall / F1",
+                  plots_dir / "severity_error_only_prf.png")
+
+    gt_sev_eo_bin_counts = defaultdict(int)
+    pred_sev_eo_bin_counts = defaultdict(int)
+    for g, p in zip(gt_sev_eo_bin, pred_sev_eo_bin):
+        gt_sev_eo_bin_counts[g] += 1
+        pred_sev_eo_bin_counts[p] += 1
+    plot_distribution(gt_sev_eo_bin_counts, pred_sev_eo_bin_counts, ["yes", "no"],
+                      "Quality Issue (Laplacian Error Only) — GT vs Predicted Distribution",
+                      plots_dir / "severity_error_only_distribution.png")
+
     print(f"Plots written to: {plots_dir}")
 
     # ======================================================================
@@ -602,6 +710,14 @@ def main():
         na_dump_dir.mkdir(parents=True, exist_ok=True)
         for row in sev_na_rows:
             _symlink_images(row, na_dump_dir)
+
+        create_image_dumps(sev_eo_binary_rows, "severity_error_only", "gt_has_issue",
+                           "_sev_eo_binary_pred", output_dir, positive="yes", is_binary=True)
+        # NA dump for error-only
+        eo_na_dump_dir = output_dir / "image_dumps" / "severity_error_only" / "NA"
+        eo_na_dump_dir.mkdir(parents=True, exist_ok=True)
+        for row in sev_eo_na_rows:
+            _symlink_images(row, eo_na_dump_dir)
 
         # Skipped (not measurable) dump: quality issue was not evaluated
         not_meas_rows = [r for r in all_rows

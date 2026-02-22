@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+Create blend images for each venue × calibration in a data directory.
+
+For each venue with a movement.json, blends the current camera panorama
+(CAM1 left, CAM0 right) with the calibration reference panorama (1.jpg left, 0.jpg right)
+at 50% alpha. This makes camera movement visually obvious as ghosting/misalignment.
+
+Output: <data_dir>/<venue>/<ts>/movement/movement_<venue>_pano_<sport>_blend.jpg
+
+Usage:
+    python batch_blend.py <data_dir>
+    python batch_blend.py data/16_2_linux_s2
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+from PIL import Image
+
+
+def side_by_side(left: Image.Image, right: Image.Image) -> Image.Image:
+    """Concatenate two images horizontally, resizing to match height if needed."""
+    if left.size[1] != right.size[1]:
+        target_h = min(left.size[1], right.size[1])
+        left = left.resize((int(left.size[0] * target_h / left.size[1]), target_h))
+        right = right.resize((int(right.size[0] * target_h / right.size[1]), target_h))
+    total_width = left.size[0] + right.size[0]
+    new_im = Image.new("RGB", (total_width, left.size[1]))
+    new_im.paste(left, (0, 0))
+    new_im.paste(right, (left.size[0], 0))
+    return new_im
+
+
+def find_event_with_movement(venue_path: Path):
+    """Find the event directory that contains movement/movement.json."""
+    for entry in sorted(venue_path.iterdir()):
+        if entry.is_dir():
+            mov_json = entry / "movement" / "movement.json"
+            if mov_json.exists():
+                return entry, mov_json
+    return None, None
+
+
+def find_cam_image(directory: Path, cam: str) -> Path | None:
+    """Find CAM0_1.jpg or CAM1_1.jpg with _rot.jpg fallback."""
+    path = directory / f"{cam}_1.jpg"
+    if path.exists():
+        return path
+    rot_path = directory / f"{cam}_1_rot.jpg"
+    if rot_path.exists():
+        return rot_path
+    return None
+
+
+def process_venue(venue_path: Path):
+    """Create blend images for all calibrations in a venue."""
+    venue_id = venue_path.name
+    event_dir, mov_json = find_event_with_movement(venue_path)
+    if event_dir is None:
+        return 0, 0
+
+    collected = event_dir / "collected"
+    cam0_path = find_cam_image(collected, "CAM0")
+    cam1_path = find_cam_image(collected, "CAM1")
+    if cam0_path is None or cam1_path is None:
+        print(f"  {venue_id}: missing camera images in {collected}")
+        return 0, 0
+
+    # Load movement.json to get calibration list
+    try:
+        with open(mov_json) as f:
+            mov_data = json.load(f)
+    except Exception as e:
+        print(f"  {venue_id}: error reading {mov_json}: {e}")
+        return 0, 0
+
+    # Get unique calibrations
+    calibrations = set()
+    for m in mov_data.get("movements", []):
+        calib = m.get("calibration", "").lower()
+        if calib:
+            calibrations.add(calib)
+
+    if not calibrations:
+        return 0, 0
+
+    movement_dir = event_dir / "movement"
+    msc_dir = collected / "multisportcalibration"
+    created = 0
+    skipped = 0
+
+    for sport in sorted(calibrations):
+        blend_name = f"movement_{venue_id}_pano_{sport}_blend.jpg"
+        blend_path = movement_dir / blend_name
+
+        current_name = f"movement_{venue_id}_pano_{sport}_current.jpg"
+        reference_name = f"movement_{venue_id}_pano_{sport}_reference.jpg"
+        current_path = movement_dir / current_name
+        reference_path = movement_dir / reference_name
+
+        if blend_path.exists() and current_path.exists() and reference_path.exists():
+            skipped += 1
+            continue
+
+        # Check calibration reference images
+        ref_0 = msc_dir / sport / "0.jpg"
+        ref_1 = msc_dir / sport / "1.jpg"
+        if not ref_0.exists() or not ref_1.exists():
+            continue
+
+        try:
+            # Current panorama: CAM1 left, CAM0 right (matches proactive-camera-monitoring)
+            cam0_img = Image.open(cam0_path)
+            cam1_img = Image.open(cam1_path)
+            pano = side_by_side(cam1_img, cam0_img)
+
+            # Reference panorama: 1.jpg left, 0.jpg right
+            ref0_img = Image.open(ref_0)
+            ref1_img = Image.open(ref_1)
+            ref_pano = side_by_side(ref1_img, ref0_img)
+
+            # Resize ref_pano to match pano dimensions for blend
+            if ref_pano.size != pano.size:
+                ref_pano = ref_pano.resize(pano.size)
+
+            # Save current and reference panos
+            if not current_path.exists():
+                pano.save(current_path, quality=85)
+            if not reference_path.exists():
+                ref_pano.save(reference_path, quality=85)
+
+            blend = Image.blend(pano, ref_pano, 0.5)
+            if not blend_path.exists():
+                blend.save(blend_path, quality=85)
+            created += 1
+        except Exception as e:
+            print(f"  {venue_id}/{sport}: error creating blend: {e}")
+
+    return created, skipped
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: python {sys.argv[0]} <data_dir>")
+        sys.exit(1)
+
+    data_dir = Path(sys.argv[1])
+    if not data_dir.is_dir():
+        print(f"Error: {data_dir} is not a directory")
+        sys.exit(1)
+
+    venues = sorted(d for d in data_dir.iterdir() if d.is_dir())
+    print(f"Processing {len(venues)} venues in {data_dir}...")
+
+    total_created = 0
+    total_skipped = 0
+    venues_with_blends = 0
+
+    for i, venue_path in enumerate(venues, 1):
+        created, skipped = process_venue(venue_path)
+        total_created += created
+        total_skipped += skipped
+        if created > 0:
+            venues_with_blends += 1
+        if i % 100 == 0:
+            print(f"  [{i}/{len(venues)}] created={total_created} skipped={total_skipped}")
+
+    print(f"\nDone:")
+    print(f"  Venues processed:      {len(venues)}")
+    print(f"  Venues with new blends: {venues_with_blends}")
+    print(f"  Blends created:        {total_created}")
+    print(f"  Blends skipped (exist): {total_skipped}")
+
+
+if __name__ == "__main__":
+    main()

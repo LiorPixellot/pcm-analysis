@@ -20,6 +20,10 @@ python is_measurable.py --input <step2_output.csv> --data-dir <data_dir>
 
 # Alternative to Step 3: Xlsx-driven issue detection (one event per venue, like run_is_measurable.py)
 python detect_issues.py --dataset <data_dir> --blur-xlsx <blur_xlsx>
+
+# Post-pipeline: Consolidate two pipeline runs into best-per-venue xlsx
+# Picks the best row per venue, generates joined CAM0+CAM1 images, and adds image hyperlink columns
+python consolidate_runs.py <run1_xlsx> <run2_xlsx> -o <output.xlsx>
 ```
 
 Each script creates a timestamped subdirectory under `output_dir/` (e.g., `output_dir/laplacian_2025-02-12_14-30/`).
@@ -62,7 +66,7 @@ Both `run_is_measurable.py` and `detect_issues.py` are xlsx-driven (one event pe
     focus.json        # Ground truth focus metrics from production
 ```
 
-Data directories: `all_data_02_09/` (~5100 entries), `data_11_2/`.
+Data directories: `all_data_02_09/` (~5100 entries), `data_11_2/`, `data/16_2_linux_s2/`, `data/18_2_linux_s2/`.
 
 ## Focus Severity Thresholds (laplacian_th_calculations.py)
 
@@ -95,7 +99,7 @@ To add a new category to `detect_issues.py`: create `examples/<category>/` with 
 Python 3.12 with venv. No `requirements.txt` — key packages:
 - **opencv-python** (`cv2`) — `laplacian_calculations.py`
 - **openpyxl** — `concat_blur.py`, `concat_with_is_measurable.py` (Excel output with clickable hyperlinks)
-- **Pillow** (`PIL`) — `is_measurable.py`, `detect_issues.py`
+- **Pillow** (`PIL`) — `is_measurable.py`, `detect_issues.py`, `consolidate_runs.py`
 - **google-genai** (`from google import genai`) — Gemini API client
 - **pandas** + **plotly** — `analyze_blur_severity.py` (reads both CSV and XLSX input)
 - **PyYAML** — config parsing

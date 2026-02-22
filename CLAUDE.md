@@ -24,7 +24,16 @@ python detect_issues.py --dataset <data_dir> --blur-xlsx <blur_xlsx>
 # Post-pipeline: Consolidate two pipeline runs into best-per-venue xlsx
 # Picks the best row per venue, generates joined CAM0+CAM1 images, and adds image hyperlink columns
 python consolidate_runs.py <run1_xlsx> <run2_xlsx> -o <output.xlsx>
+
+# Setup analysis: Enrich blur xlsx with camera geometry data (setup.json)
+# Adds 15 columns: severity, coverage spares, zoom improvability, decision
+python enrich_blur_with_setup.py --dataset <data_dir> --blur-xlsx <blur_xlsx> -o <output.xlsx>
+
+# Setup analysis: Standalone setup xlsx (one row per venue, 20 columns, no blur join)
+python consolidate_setup_results.py <data_dir>
 ```
+
+Setup analysis is a cross-repo process — see `new_dataset_runbook_setup.md` for the full runbook including `batch_setup.py` (in `proactive-camera-monitoring` repo).
 
 Each script creates a timestamped subdirectory under `output_dir/` (e.g., `output_dir/laplacian_2025-02-12_14-30/`).
 
@@ -75,6 +84,14 @@ Data directories: `all_data_02_09/` (~5100 entries), `data_11_2/`, `data/16_2_li
 - **Warning**: `focus_abs_dif_rel` >= 0.7, or either camera `mid_focus` <= 20
 - **Ok**: all values within acceptable ranges
 
+## Setup Severity Thresholds (enrich_blur_with_setup.py / consolidate_setup_results.py)
+
+- **Error**: `all_spares` > 3000
+- **Warning**: `all_spares` >= 2000
+- **Ok**: `all_spares` < 2000
+- **can_improve_by_zoom**: `"Yes"` if `(left_spare + right_spare) / max_camera_overlap / 2` is in [0.7, 1.3]
+- **decision**: Error+Yes → `maintain_remote`, Error+No → `maintain_on_site`, Warning → `watch`, Ok → `ok`
+
 ## Few-Shot Examples
 
 `is_measurable.py` loads example images from subdirectories under `examples/`:
@@ -98,7 +115,7 @@ To add a new category to `detect_issues.py`: create `examples/<category>/` with 
 
 Python 3.12 with venv. No `requirements.txt` — key packages:
 - **opencv-python** (`cv2`) — `laplacian_calculations.py`
-- **openpyxl** — `concat_blur.py`, `concat_with_is_measurable.py` (Excel output with clickable hyperlinks)
+- **openpyxl** — `concat_blur.py`, `concat_with_is_measurable.py`, `enrich_blur_with_setup.py`, `consolidate_setup_results.py` (Excel output with clickable hyperlinks)
 - **Pillow** (`PIL`) — `is_measurable.py`, `detect_issues.py`, `consolidate_runs.py`
 - **google-genai** (`from google import genai`) — Gemini API client
 - **pandas** + **plotly** — `analyze_blur_severity.py` (reads both CSV and XLSX input)

@@ -23,22 +23,23 @@ NEW_COLS = [
     "movement_indicator",
     "movement_length_cam0",
     "movement_length_cam1",
+    "movement_length_cam2",
     "movement_severity",
 ]
 
 
-def classify_movement_severity(indicator, length_cam0, length_cam1):
+def classify_movement_severity(indicator, length_cam0, length_cam1, length_cam2=None):
     """
     Classify movement severity based on indicator and movement lengths.
     - indicator 2 or -1: NA
-    - indicator 0: use min(cam0, cam1) to determine Error/Warning/Ok
+    - indicator 0: use max(cam0, cam1, cam2) to determine Error/Warning/Ok
     """
     if indicator is None:
         return None
     if indicator in (2, -1):
         return "NA"
     if indicator == 0:
-        lengths = [l for l in (length_cam0, length_cam1) if l is not None]
+        lengths = [l for l in (length_cam0, length_cam1, length_cam2) if l is not None]
         if not lengths:
             return None
         max_length = max(lengths)
@@ -85,11 +86,14 @@ def load_movement_data(data_dir: Path) -> dict:
                     "movement_indicator": m.get("movement_indicator"),
                     "movement_length_cam0": None,
                     "movement_length_cam1": None,
+                    "movement_length_cam2": None,
                 }
             if cam_id == 0:
                 venue_calibrations[calib]["movement_length_cam0"] = m.get("movement_length")
             elif cam_id == 1:
                 venue_calibrations[calib]["movement_length_cam1"] = m.get("movement_length")
+            elif cam_id == 2:
+                venue_calibrations[calib]["movement_length_cam2"] = m.get("movement_length")
             # movement_indicator should be same for both cameras, take first seen
             if venue_calibrations[calib]["movement_indicator"] is None:
                 venue_calibrations[calib]["movement_indicator"] = m.get("movement_indicator")
@@ -164,8 +168,10 @@ def main():
             ws_dst.cell(row=out_row, column=base + 1, value=mov["movement_indicator"])
             ws_dst.cell(row=out_row, column=base + 2, value=mov["movement_length_cam0"])
             ws_dst.cell(row=out_row, column=base + 3, value=mov["movement_length_cam1"])
-            ws_dst.cell(row=out_row, column=base + 4, value=classify_movement_severity(
-                mov["movement_indicator"], mov["movement_length_cam0"], mov["movement_length_cam1"]
+            ws_dst.cell(row=out_row, column=base + 4, value=mov["movement_length_cam2"])
+            ws_dst.cell(row=out_row, column=base + 5, value=classify_movement_severity(
+                mov["movement_indicator"], mov["movement_length_cam0"],
+                mov["movement_length_cam1"], mov["movement_length_cam2"]
             ))
             out_row += 1
             total_out_rows += 1

@@ -12,32 +12,50 @@ from pathlib import Path
 
 def calc_focus_severity(focus_right_mean, focus_left_mean,
                         focus_abs_dif_rel,
-                        focus_right_mid, focus_left_mid):
+                        focus_right_mid, focus_left_mid,
+                        focus_center_mean=None, focus_center_mid=None,
+                        focus_abs_dif_rel_12=None):
     """
     Calculate focus severity based on thresholds.
 
+    For 3-camera setups, also considers center camera metrics and pair (1,2) dif_rel.
+    Empty/None values for 3-cam fields → original 2-cam logic.
+
     Returns one of: "NA", "Ok", "Warning", "Error"
     """
+    # Collect all camera means and mids
+    all_means = [focus_right_mean, focus_left_mean]
+    all_mids = [focus_right_mid, focus_left_mid]
+    all_dif_rels = [focus_abs_dif_rel]
+
+    if focus_center_mean is not None and focus_center_mean != '':
+        all_means.append(float(focus_center_mean))
+    if focus_center_mid is not None and focus_center_mid != '':
+        all_mids.append(float(focus_center_mid))
+    if focus_abs_dif_rel_12 is not None and focus_abs_dif_rel_12 != '':
+        all_dif_rels.append(float(focus_abs_dif_rel_12))
+
     # NA: too dark to trust Laplacian values
-    if min(focus_right_mean, focus_left_mean) < 50:
+    if min(all_means) < 50:
         return "NA"
 
-    avg_mean = (focus_right_mean + focus_left_mean) / 2
-    min_mid = min(focus_right_mid, focus_left_mid)
-    max_mid = max(focus_right_mid, focus_left_mid)
+    avg_mean = sum(all_means) / len(all_means)
+    min_mid = min(all_mids)
+    max_mid = max(all_mids)
+    max_dif_rel = max(all_dif_rels)
 
     # Error (any triggers):
-    if focus_abs_dif_rel > 1.0:          # large diff between cameras
+    if max_dif_rel > 1.0:               # large diff between any camera pair
         return "Error"
     if min_mid <= 15:                     # one camera very blurry
         return "Error"
     if avg_mean < 95 and min_mid <= 25:   # dark + bad mid
         return "Error"
-    if max_mid <= 50 and avg_mean < 100:  # both cameras bad
+    if max_mid <= 50 and avg_mean < 100:  # all cameras bad
         return "Error"
 
     # Warning:
-    if focus_abs_dif_rel >= 0.5 or min_mid <= 25:
+    if max_dif_rel >= 0.5 or min_mid <= 25:
         return "Warning"
 
     return "Ok"
@@ -92,11 +110,18 @@ def main():
                     focus_right_mid = float(row['focus_right_mid'])
                     focus_left_mid = float(row['focus_left_mid'])
 
+                    # Parse optional 3-cam columns
+                    focus_center_mean = row.get('focus_center_mean', '')
+                    focus_center_mid = row.get('focus_center_mid', '')
+                    focus_abs_dif_rel_12 = row.get('focus_abs_dif_rel_12', '')
+
                     # Calculate severity
                     severity = calc_focus_severity(
                         focus_right_mean, focus_left_mean,
                         focus_abs_dif_rel,
-                        focus_right_mid, focus_left_mid
+                        focus_right_mid, focus_left_mid,
+                        focus_center_mean, focus_center_mid,
+                        focus_abs_dif_rel_12,
                     )
 
                     row['Focus_severity'] = severity

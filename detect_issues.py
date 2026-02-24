@@ -254,7 +254,10 @@ def process_entry(index: int, entry: dict, client: genai.Client, model_name: str
         return {"index": index, "result_row": result_row, "token_usage": None,
                 "processed": False, "skipped": True, "skip_reason": "could not load images"}
 
-    cam0_bytes, cam1_bytes, joined_bytes = images
+    if len(images) == 4:
+        cam0_bytes, cam1_bytes, _, joined_bytes = images
+    else:
+        cam0_bytes, cam1_bytes, joined_bytes = images
 
     try:
         result, token_usage = analyze_venue(

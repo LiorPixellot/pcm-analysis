@@ -23,6 +23,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from camera_utils import detect_dataset_camera_count
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -40,6 +42,8 @@ def main():
                         help='Pre-computed detect_issues CSV (skip detect_issues.py)')
     parser.add_argument('--examples-dir', default=None,
                         help='Examples directory for detect_issues.py (passed as --use-examples)')
+    parser.add_argument('--num-cameras', type=int, choices=[2, 3], default=None,
+                        help='Number of cameras (2 or 3). Auto-detected from data if omitted.')
     args = parser.parse_args()
 
     python = sys.executable
@@ -58,6 +62,14 @@ def main():
     if args.detect_issues_csv and not Path(args.detect_issues_csv).exists():
         print(f"Error: detect_issues_csv not found: {args.detect_issues_csv}", file=sys.stderr)
         sys.exit(1)
+
+    # Detect or use specified camera count
+    if args.num_cameras:
+        num_cameras = args.num_cameras
+        print(f"Camera count: {num_cameras} (user-specified)")
+    else:
+        num_cameras = detect_dataset_camera_count(Path(args.data_dir))
+        print(f"Camera count: {num_cameras} (auto-detected from dataset)")
 
     # Create master output directory
     if args.output_dir:
@@ -167,10 +179,11 @@ def main():
         detect_issues_csv = args.detect_issues_csv
         print(f"Using pre-computed detect_issues CSV: {detect_issues_csv}\n")
     else:
+        detect_script = 'detect_issues_3cam.py' if num_cameras == 3 else 'detect_issues.py'
         print("=" * 60)
-        print("Step 5: Running detect_issues.py")
+        print(f"Step 5: Running {detect_script}")
         print("=" * 60)
-        cmd = [python, '-u', str(script_dir / 'detect_issues.py'),
+        cmd = [python, '-u', str(script_dir / detect_script),
                '--dataset', args.data_dir, '--blur-xlsx', args.blur_xlsx,
                '--output-dir', output_dir_str]
         if args.limit:

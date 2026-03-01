@@ -21,16 +21,24 @@ from pathlib import Path
 from PIL import Image
 
 
-def side_by_side(left: Image.Image, right: Image.Image) -> Image.Image:
-    """Concatenate two images horizontally, resizing to match height if needed."""
-    if left.size[1] != right.size[1]:
-        target_h = min(left.size[1], right.size[1])
-        left = left.resize((int(left.size[0] * target_h / left.size[1]), target_h))
-        right = right.resize((int(right.size[0] * target_h / right.size[1]), target_h))
-    total_width = left.size[0] + right.size[0]
-    new_im = Image.new("RGB", (total_width, left.size[1]))
-    new_im.paste(left, (0, 0))
-    new_im.paste(right, (left.size[0], 0))
+def side_by_side(images: list[Image.Image]) -> Image.Image:
+    """Concatenate images horizontally, resizing all to the same height."""
+    if not images:
+        raise ValueError("No images")
+    if len(images) == 1:
+        return images[0]
+    target_h = min(img.size[1] for img in images)
+    resized = []
+    for img in images:
+        if img.size[1] != target_h:
+            img = img.resize((int(img.size[0] * target_h / img.size[1]), target_h))
+        resized.append(img)
+    total_width = sum(img.size[0] for img in resized)
+    new_im = Image.new("RGB", (total_width, target_h))
+    x_offset = 0
+    for img in resized:
+        new_im.paste(img, (x_offset, 0))
+        x_offset += img.size[0]
     return new_im
 
 
@@ -45,13 +53,11 @@ def find_event_with_movement(venue_path: Path):
 
 
 def find_cam_image(directory: Path, cam: str) -> Path | None:
-    """Find CAM0_1.jpg or CAM1_1.jpg with _rot.jpg fallback."""
-    path = directory / f"{cam}_1.jpg"
-    if path.exists():
-        return path
-    rot_path = directory / f"{cam}_1_rot.jpg"
-    if rot_path.exists():
-        return rot_path
+    """Find CAM0_1.jpg or CAM1_1.jpg with _0.jpg and _rot.jpg fallbacks."""
+    for suffix in ["_1.jpg", "_1_rot.jpg", "_0.jpg", "_0_rot.jpg"]:
+        path = directory / f"{cam}{suffix}"
+        if path.exists():
+            return path
     return None
 
 
@@ -68,6 +74,7 @@ def process_venue(venue_path: Path):
     if cam0_path is None or cam1_path is None:
         print(f"  {venue_id}: missing camera images in {collected}")
         return 0, 0
+    cam2_path = find_cam_image(collected, "CAM2")  # optional 3rd camera
 
     # Load movement.json to get calibration list
     try:
@@ -111,16 +118,25 @@ def process_venue(venue_path: Path):
         if not ref_0.exists() or not ref_1.exists():
             continue
 
+        # Determine if CAM2 is usable for this calibration
+        has_cam2 = cam2_path is not None and (msc_dir / sport / "2.jpg").exists()
+
         try:
-            # Current panorama: CAM1 left, CAM0 right (matches proactive-camera-monitoring)
+            # Current panorama: right-to-left numbering (CAM2, CAM1, CAM0)
             cam0_img = Image.open(cam0_path)
             cam1_img = Image.open(cam1_path)
-            pano = side_by_side(cam1_img, cam0_img)
+            cam_images = [cam1_img, cam0_img]
+            if has_cam2:
+                cam_images.insert(0, Image.open(cam2_path))
+            pano = side_by_side(cam_images)
 
-            # Reference panorama: 1.jpg left, 0.jpg right
+            # Reference panorama: same order (2.jpg, 1.jpg, 0.jpg)
             ref0_img = Image.open(ref_0)
             ref1_img = Image.open(ref_1)
-            ref_pano = side_by_side(ref1_img, ref0_img)
+            ref_images = [ref1_img, ref0_img]
+            if has_cam2:
+                ref_images.insert(0, Image.open(msc_dir / sport / "2.jpg"))
+            ref_pano = side_by_side(ref_images)
 
             # Resize ref_pano to match pano dimensions for blend
             if ref_pano.size != pano.size:

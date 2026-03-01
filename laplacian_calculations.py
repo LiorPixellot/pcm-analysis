@@ -15,6 +15,8 @@ from pathlib import Path
 
 import cv2
 
+from camera_utils import find_cam_image, detect_camera_count
+
 
 def image_focus(image_view):
     """
@@ -31,17 +33,22 @@ def image_focus(image_view):
 def extract_region(image, side, joined_frame_size=800):
     """
     Extract 800x800 region from center of image.
-    side: 'right' (CAM0) extracts left edge, 'left' (CAM1) extracts right edge.
+
+    side values:
+      'right'        — CAM0 (right camera): extract left edge
+      'left'         — CAM1/CAM2 (left camera): extract right edge
+      'center_right' — CAM1 center camera: extract left edge (overlap with CAM0)
+      'center_left'  — CAM1 center camera: extract right edge (overlap with CAM2)
     """
     center_y, size_x, _ = image.shape
     center_y = center_y // 2
 
-    if side == 'right':
-        # CAM0 (right camera) - extract from left side of image
+    if side in ('right', 'center_right'):
+        # Extract from left side of image
         region = image[center_y - joined_frame_size // 2:center_y + joined_frame_size // 2,
                        0:joined_frame_size]
     else:
-        # CAM1 (left camera) - extract from right side of image
+        # Extract from right side of image
         region = image[center_y - joined_frame_size // 2:center_y + joined_frame_size // 2,
                        size_x - joined_frame_size:size_x]
     return region
@@ -58,41 +65,90 @@ def process_focus_folder(focus_folder):
     """
     Process a single focus folder and return calculated metrics.
     Returns dict with metrics or None if images are missing.
+
+    For 3-camera setups (CAM0=right, CAM1=center, CAM2=left):
+      - Pair (0,1): CAM0 left edge vs CAM1 right edge → focus_abs_dif_rel
+      - Pair (1,2): CAM1 left edge vs CAM2 right edge → focus_abs_dif_rel_12
+      - CAM1 center metrics from both edges
     """
-    cam0_path = focus_folder / 'CAM0_1.jpg'
-    cam1_path = focus_folder / 'CAM1_1.jpg'
-    if not cam0_path.exists() or not cam1_path.exists():
-        cam0_path = focus_folder / 'CAM0_1_rot.jpg'
-        cam1_path = focus_folder / 'CAM1_1_rot.jpg'
-    if not cam0_path.exists() or not cam1_path.exists():
+    cam0_path = find_cam_image(focus_folder, 'CAM0')
+    cam1_path = find_cam_image(focus_folder, 'CAM1')
+    if cam0_path is None or cam1_path is None:
         return None
 
-    # Load images
     img_right = cv2.imread(str(cam0_path))
     img_left = cv2.imread(str(cam1_path))
-
     if img_right is None or img_left is None:
         return None
 
-    # Extract center regions
-    region_right = extract_region(img_right, 'right')
-    region_left = extract_region(img_left, 'left')
+    num_cameras = detect_camera_count(focus_folder)
 
-    # Calculate focus metrics
-    right_mean, right_mid_focus = image_focus(region_right)
-    left_mean, left_mid_focus = image_focus(region_left)
+    if num_cameras == 3:
+        cam2_path = find_cam_image(focus_folder, 'CAM2')
+        if cam2_path is None:
+            return None
+        img_cam2 = cv2.imread(str(cam2_path))
+        if img_cam2 is None:
+            return None
 
-    # Calculate relative difference
-    focus_abs_dif = abs(right_mid_focus - left_mid_focus)
-    focus_abs_dif_rel = focus_abs_dif / (right_mid_focus + left_mid_focus) * 2
+        # CAM0 (right camera): left edge overlaps with CAM1 right edge
+        region_cam0 = extract_region(img_right, 'right')
+        # CAM1 (center camera): right edge overlaps with CAM0, left edge overlaps with CAM2
+        region_cam1_right = extract_region(img_left, 'center_left')
+        region_cam1_left = extract_region(img_left, 'center_right')
+        # CAM2 (left camera): right edge overlaps with CAM1
+        region_cam2 = extract_region(img_cam2, 'left')
 
-    return {
-        'focus_right_mean': right_mean,
-        'focus_left_mean': left_mean,
-        'focus_right_mid': right_mid_focus,
-        'focus_left_mid': left_mid_focus,
-        'focus_abs_dif_rel': focus_abs_dif_rel
-    }
+        cam0_mean, cam0_mid = image_focus(region_cam0)
+        cam1_right_mean, cam1_right_mid = image_focus(region_cam1_right)
+        cam1_left_mean, cam1_left_mid = image_focus(region_cam1_left)
+        cam2_mean, cam2_mid = image_focus(region_cam2)
+
+        # Pair (0,1): CAM0 left edge vs CAM1 right edge
+        dif_01 = abs(cam0_mid - cam1_right_mid)
+        dif_rel_01 = dif_01 / (cam0_mid + cam1_right_mid) * 2 if (cam0_mid + cam1_right_mid) > 0 else 0
+
+        # Pair (1,2): CAM1 left edge vs CAM2 right edge
+        dif_12 = abs(cam1_left_mid - cam2_mid)
+        dif_rel_12 = dif_12 / (cam1_left_mid + cam2_mid) * 2 if (cam1_left_mid + cam2_mid) > 0 else 0
+
+        # CAM1 center metrics: worst of both edges
+        focus_center_mean = min(cam1_right_mean, cam1_left_mean)
+        focus_center_mid = min(cam1_right_mid, cam1_left_mid)
+
+        return {
+            'num_cameras': 3,
+            'focus_right_mean': cam0_mean,
+            'focus_left_mean': cam2_mean,
+            'focus_right_mid': cam0_mid,
+            'focus_left_mid': cam2_mid,
+            'focus_abs_dif_rel': dif_rel_01,
+            'focus_center_mean': focus_center_mean,
+            'focus_center_mid': focus_center_mid,
+            'focus_abs_dif_rel_12': dif_rel_12,
+        }
+    else:
+        # Original 2-camera logic
+        region_right = extract_region(img_right, 'right')
+        region_left = extract_region(img_left, 'left')
+
+        right_mean, right_mid_focus = image_focus(region_right)
+        left_mean, left_mid_focus = image_focus(region_left)
+
+        focus_abs_dif = abs(right_mid_focus - left_mid_focus)
+        focus_abs_dif_rel = focus_abs_dif / (right_mid_focus + left_mid_focus) * 2 if (right_mid_focus + left_mid_focus) > 0 else 0
+
+        return {
+            'num_cameras': 2,
+            'focus_right_mean': right_mean,
+            'focus_left_mean': left_mean,
+            'focus_right_mid': right_mid_focus,
+            'focus_left_mid': left_mid_focus,
+            'focus_abs_dif_rel': focus_abs_dif_rel,
+            'focus_center_mean': '',
+            'focus_center_mid': '',
+            'focus_abs_dif_rel_12': '',
+        }
 
 
 def validate_against_json(calculated, focus_json_path, tolerance=0.001):
@@ -149,11 +205,15 @@ def process_entry(venue_id, event_id, focus_folder, tolerance):
         'venue_id': venue_id,
         'event_id': event_id,
         'skipped': False,
+        'num_cameras': metrics['num_cameras'],
         'focus_right_mean': metrics['focus_right_mean'],
         'focus_left_mean': metrics['focus_left_mean'],
         'focus_right_mid': metrics['focus_right_mid'],
         'focus_left_mid': metrics['focus_left_mid'],
         'focus_abs_dif_rel': metrics['focus_abs_dif_rel'],
+        'focus_center_mean': metrics['focus_center_mean'],
+        'focus_center_mid': metrics['focus_center_mid'],
+        'focus_abs_dif_rel_12': metrics['focus_abs_dif_rel_12'],
         'validation_status': status,
         'validation_details': details,
         'joined_image': joined_image,
@@ -215,11 +275,15 @@ def main():
     fieldnames = [
         'venue_id',
         'event_id',
+        'num_cameras',
         'focus_right_mean',
         'focus_left_mean',
         'focus_right_mid',
         'focus_left_mid',
         'focus_abs_dif_rel',
+        'focus_center_mean',
+        'focus_center_mid',
+        'focus_abs_dif_rel_12',
         'validation_status',
         'validation_details',
         'joined_image'
@@ -262,11 +326,15 @@ def main():
                 row = {
                     'venue_id': result['venue_id'],
                     'event_id': result['event_id'],
+                    'num_cameras': result['num_cameras'],
                     'focus_right_mean': result['focus_right_mean'],
                     'focus_left_mean': result['focus_left_mean'],
                     'focus_right_mid': result['focus_right_mid'],
                     'focus_left_mid': result['focus_left_mid'],
                     'focus_abs_dif_rel': result['focus_abs_dif_rel'],
+                    'focus_center_mean': result['focus_center_mean'],
+                    'focus_center_mid': result['focus_center_mid'],
+                    'focus_abs_dif_rel_12': result['focus_abs_dif_rel_12'],
                     'validation_status': result['validation_status'],
                     'validation_details': result['validation_details'],
                     'joined_image': result['joined_image'],

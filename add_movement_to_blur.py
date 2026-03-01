@@ -113,7 +113,10 @@ def main():
         sys.exit(1)
 
     data_dir_name = data_dir.name
-    dst_xlsx = Path(__file__).parent / "output_dir" / f"PQS_blur_by_venue_with_movement_{data_dir_name}.xlsx"
+    if len(sys.argv) >= 4 and sys.argv[2] == "-o":
+        dst_xlsx = Path(sys.argv[3])
+    else:
+        dst_xlsx = Path(__file__).parent / "output_dir" / f"PQS_blur_by_venue_with_movement_{data_dir_name}.xlsx"
 
     print(f"Loading movement data from {data_dir}...")
     movement_data = load_movement_data(data_dir)
@@ -138,11 +141,14 @@ def main():
     matched_venues = 0
     unmatched_venues = 0
     total_out_rows = 0
+    pqs_venue_ids = set()
 
     for src_row in ws_src.iter_rows(min_row=2, values_only=True):
         venue_id = src_row[venue_col_idx]
         if not venue_id:
             continue
+
+        pqs_venue_ids.add(venue_id)
 
         # Copy source columns
         src_values = list(src_row[:num_src_cols])
@@ -176,12 +182,37 @@ def main():
             out_row += 1
             total_out_rows += 1
 
+    # Second pass: venues with movement data but not in PQS xlsx
+    dataset_only = 0
+    for venue_id, venue_movements in movement_data.items():
+        if venue_id in pqs_venue_ids:
+            continue
+        dataset_only += 1
+        src_values = [None] * num_src_cols
+        src_values[venue_col_idx] = venue_id
+        for calib, mov in venue_movements.items():
+            for c, val in enumerate(src_values, 1):
+                ws_dst.cell(row=out_row, column=c, value=val)
+            base = num_src_cols + 1
+            ws_dst.cell(row=out_row, column=base, value=calib)
+            ws_dst.cell(row=out_row, column=base + 1, value=mov["movement_indicator"])
+            ws_dst.cell(row=out_row, column=base + 2, value=mov["movement_length_cam0"])
+            ws_dst.cell(row=out_row, column=base + 3, value=mov["movement_length_cam1"])
+            ws_dst.cell(row=out_row, column=base + 4, value=mov["movement_length_cam2"])
+            ws_dst.cell(row=out_row, column=base + 5, value=classify_movement_severity(
+                mov["movement_indicator"], mov["movement_length_cam0"],
+                mov["movement_length_cam1"], mov["movement_length_cam2"]
+            ))
+            out_row += 1
+            total_out_rows += 1
+
     wb_src.close()
     wb_dst.save(dst_xlsx)
 
     print(f"\nResults:")
-    print(f"  Venues with movement data: {matched_venues}")
-    print(f"  Venues without movement:   {unmatched_venues}")
+    print(f"  PQS venues with movement data: {matched_venues}")
+    print(f"  PQS venues without movement:   {unmatched_venues}")
+    print(f"  Dataset-only venues (not in PQS): {dataset_only}")
     print(f"  Output rows:               {total_out_rows}")
     print(f"  Saved to: {dst_xlsx}")
 

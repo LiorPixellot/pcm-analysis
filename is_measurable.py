@@ -30,6 +30,8 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
+from camera_utils import find_cam_image
+
 
 def load_model_pricing() -> dict:
     """Load model pricing from cost.yaml in the script directory."""
@@ -100,11 +102,20 @@ def load_examples() -> Dict[str, Union[bytes, List[bytes]]]:
 
 
 # Prompt for measurability analysis — split into parts for few-shot example interleaving
-MEASURABILITY_PROMPT_PART1 = """You are analyzing two or three images from adjacent cameras at a sports venue.
+# 2-camera intro (CAM0=right, CAM1=left)
+_PROMPT_INTRO_2CAM = """You are analyzing images from adjacent cameras at a sports venue.
 
 The first image is from the RIGHT camera (CAM0), the second image is from the LEFT camera (CAM1).
-The third image (if provided) is a side-by-side composition of the overlapping regions between the two cameras — left half from CAM1, right half from CAM0. Use it to directly compare focus quality between cameras in the same scene area.
+The third image (if provided) is a side-by-side composition of the overlapping regions between the two cameras — left half from CAM1, right half from CAM0. Use it to directly compare focus quality between cameras in the same scene area."""
 
+# 3-camera intro (CAM0=right, CAM1=center, CAM2=left)
+_PROMPT_INTRO_3CAM = """You are analyzing images from a 3-camera setup at a sports venue.
+
+The first image is from the RIGHT camera (CAM0), the second image is from the CENTER camera (CAM1), the third image is from the LEFT camera (CAM2).
+Adjacent pairs share overlapping coverage: pair (0,1) covers the right side, pair (1,2) covers the left side.
+A joined overlap image may also be provided showing the overlap between CAM0 and CAM1."""
+
+MEASURABILITY_PROMPT_PART1_BODY = """
 ## STEP 1: Check Environmental Conditions FIRST
 
 Before assessing focus, check if environmental conditions allow reliable measurement.
@@ -148,7 +159,7 @@ EXAMPLE_OBJECT_IN_FIELD_LABEL = """An object is blocking/interfering with the ca
 
 EXAMPLE_CONDENSATION_LABEL = """This image shows condensation/moisture on the camera lens. The field is still visible through the condensation, so is_measurable = "Yes", but quality_issue_type = "Condensation"."""
 
-MEASURABILITY_PROMPT_PART2 = """
+_PROMPT_PART2_BODY = """
 ## STEP 2: Assess Quality Issues (only if measurable)
 
 If environmental conditions are clear (is_measurable = "Yes"), check for these quality issues:
@@ -156,16 +167,17 @@ If environmental conditions are clear (is_measurable = "Yes"), check for these q
 **Focus issues:**
 - Soft or blurry edges on players, field lines, or objects
 - Out of focus areas that should be sharp
-- Compare sharpness between the two cameras
+- Compare sharpness between all cameras
 - Use the joined/overlap image (if provided) to compare sharpness side-by-side. If one camera's half is noticeably softer or blurrier than the other, that camera has a focus problem — report has_quality_issue=Yes, quality_issue_type=Focus, and which_camera pointing to the worse camera.
-- Key rule: if at least one camera has a focus problem, report a Focus issue. The which_camera field indicates which camera is worse (or "Both" if both are bad).
+- Key rule: if at least one camera has a focus problem, report a Focus issue. The which_camera field indicates which camera is worse (or "All" if all are bad).
 
 **Condensation/moisture on lens:**
 - Foggy or hazy patches ON the lens (not atmospheric fog)
 - Moisture droplets visible on camera housing
 - Parts of image obscured by lens moisture while background is still partially visible
+"""
 
-## Response Format
+_PROMPT_RESPONSE_2CAM = """## Response Format
 
 Provide a JSON response with exactly this structure:
 {
@@ -183,6 +195,26 @@ Provide a JSON response with exactly this structure:
 - quality_issue_type: "Focus" for focus problems, "Condensation" for lens moisture, "None" if no issues
 - For which_camera: "Left" = CAM1, "Right" = CAM0, "Both" = both cameras, "None" = no issues
 - focus_comparison: Based on the overlap image — "Left sharper" (CAM1 side sharper), "Right sharper" (CAM0 side sharper), "Similar" (both similar), or "N/A" (no overlap image provided or not measurable)
+- Return ONLY valid JSON, no markdown formatting or extra text"""
+
+_PROMPT_RESPONSE_3CAM = """## Response Format
+
+Provide a JSON response with exactly this structure:
+{
+    "observation": "Brief description of what you see in the images (weather, lighting, field condition)",
+    "is_measurable": "Yes" or "No",
+    "not_measurable_reason": "reason if not measurable, empty string if measurable",
+    "has_quality_issue": "Yes" or "No",
+    "quality_issue_type": "Focus" or "Condensation" or "None",
+    "which_camera": "Right" or "Center" or "Left" or "Right,Center" or "Center,Left" or "All" or "None",
+    "focus_comparison": "N/A"
+}
+
+**Rules:**
+- If is_measurable is "No", set has_quality_issue to "No", quality_issue_type to "None", which_camera to "None"
+- quality_issue_type: "Focus" for focus problems, "Condensation" for lens moisture, "None" if no issues
+- For which_camera: "Right" = CAM0, "Center" = CAM1, "Left" = CAM2, or comma-separated combinations, "All" = all cameras, "None" = no issues
+- focus_comparison: set to "N/A" for 3-camera setups (use which_camera instead)
 - Return ONLY valid JSON, no markdown formatting or extra text"""
 
 
@@ -296,30 +328,41 @@ def calculate_pricing(model_name: str, input_tokens: int, output_tokens: int, mo
     }
 
 
-def resolve_cam_paths(focus_dir: Path) -> Optional[Tuple[Path, Path]]:
-    """Resolve CAM0/CAM1 paths, falling back to _rot variants."""
-    cam0 = focus_dir / "CAM0_1.jpg"
-    cam1 = focus_dir / "CAM1_1.jpg"
-    if cam0.exists() and cam1.exists():
-        return cam0, cam1
-    cam0_rot = focus_dir / "CAM0_1_rot.jpg"
-    cam1_rot = focus_dir / "CAM1_1_rot.jpg"
-    if cam0_rot.exists() and cam1_rot.exists():
-        return cam0_rot, cam1_rot
-    return None
+def resolve_cam_paths(focus_dir: Path) -> Optional[Tuple]:
+    """Resolve camera image paths, falling back through suffix variants.
+
+    Returns:
+        (cam0, cam1) for 2-camera setups.
+        (cam0, cam1, cam2) for 3-camera setups.
+        None if CAM0 or CAM1 not found.
+    """
+    cam0 = find_cam_image(focus_dir, "CAM0")
+    cam1 = find_cam_image(focus_dir, "CAM1")
+    if cam0 is None or cam1 is None:
+        return None
+    cam2 = find_cam_image(focus_dir, "CAM2")
+    if cam2 is not None:
+        return cam0, cam1, cam2
+    return cam0, cam1
 
 
-def load_images(focus_dir: Path) -> Optional[Tuple[bytes, bytes, Optional[bytes]]]:
-    """Load CAM0_1.jpg, CAM1_1.jpg, and optionally joined_0_1.jpg from the focus directory."""
+def load_images(focus_dir: Path) -> Optional[Tuple]:
+    """Load camera images from the focus directory.
+
+    Returns:
+        (cam0_bytes, cam1_bytes, joined_bytes) for 2-camera setups.
+        (cam0_bytes, cam1_bytes, cam2_bytes, joined_bytes) for 3-camera setups.
+        None if required images can't be loaded.
+    """
     cam_paths = resolve_cam_paths(focus_dir)
     if cam_paths is None:
         return None
-    cam0_path, cam1_path = cam_paths
+
     joined_path = focus_dir / "joined_0_1.jpg"
 
     try:
-        cam0_image = Image.open(cam0_path)
-        cam1_image = Image.open(cam1_path)
+        cam0_image = Image.open(cam_paths[0])
+        cam1_image = Image.open(cam_paths[1])
 
         joined_bytes = None
         if joined_path.exists():
@@ -329,7 +372,11 @@ def load_images(focus_dir: Path) -> Optional[Tuple[bytes, bytes, Optional[bytes]
             except Exception as e:
                 print(f"  Warning: Failed to load joined image: {e}")
 
-        return pil_to_bytes(cam0_image), pil_to_bytes(cam1_image), joined_bytes
+        if len(cam_paths) == 3:
+            cam2_image = Image.open(cam_paths[2])
+            return pil_to_bytes(cam0_image), pil_to_bytes(cam1_image), pil_to_bytes(cam2_image), joined_bytes
+        else:
+            return pil_to_bytes(cam0_image), pil_to_bytes(cam1_image), joined_bytes
     except Exception as e:
         print(f"  Error loading images: {e}")
         return None
@@ -338,10 +385,17 @@ def load_images(focus_dir: Path) -> Optional[Tuple[bytes, bytes, Optional[bytes]
 def analyze_images(client: genai.Client, model_name: str, cam0_bytes: bytes, cam1_bytes: bytes,
                     examples: Optional[Dict[str, bytes]] = None,
                     media_resolution: Optional[str] = None,
-                    joined_bytes: Optional[bytes] = None) -> Tuple[dict, dict]:
+                    joined_bytes: Optional[bytes] = None,
+                    cam2_bytes: Optional[bytes] = None) -> Tuple[dict, dict]:
     """Send images to Gemini and get measurability analysis."""
+    is_3cam = cam2_bytes is not None
+
+    # Select camera-count-aware prompt sections
+    intro = _PROMPT_INTRO_3CAM if is_3cam else _PROMPT_INTRO_2CAM
+    response_format = _PROMPT_RESPONSE_3CAM if is_3cam else _PROMPT_RESPONSE_2CAM
+
     # Build parts list, interleaving example images within the prompt
-    parts = [types.Part.from_text(text=MEASURABILITY_PROMPT_PART1)]
+    parts = [types.Part.from_text(text=intro + MEASURABILITY_PROMPT_PART1_BODY)]
 
     # Build kwargs for Part.from_bytes, including media_resolution if set
     image_kwargs = {}
@@ -367,15 +421,22 @@ def analyze_images(client: genai.Client, model_name: str, cam0_bytes: bytes, cam
             parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cond_bytes, **image_kwargs))
     parts.append(types.Part.from_text(text=EXAMPLE_CONDENSATION_LABEL))
 
-    parts.append(types.Part.from_text(text=MEASURABILITY_PROMPT_PART2))
+    parts.append(types.Part.from_text(text=_PROMPT_PART2_BODY + response_format))
 
     # Append the actual camera images to analyze
+    parts.append(types.Part.from_text(text="CAM0 (right camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam0_bytes, **image_kwargs))
+    parts.append(types.Part.from_text(text="CAM1 (center camera):" if is_3cam else "CAM1 (left camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam1_bytes, **image_kwargs))
+
+    # Append CAM2 if available (3-camera setup)
+    if cam2_bytes is not None:
+        parts.append(types.Part.from_text(text="CAM2 (left camera):"))
+        parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam2_bytes, **image_kwargs))
 
     # Append joined overlap image if available
     if joined_bytes is not None:
-        parts.append(types.Part.from_text(text="Third image: side-by-side overlap regions (left half = CAM1, right half = CAM0)"))
+        parts.append(types.Part.from_text(text="Joined overlap image (left half = CAM1, right half = CAM0):"))
         parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=joined_bytes, **image_kwargs))
 
     contents = [
@@ -503,10 +564,14 @@ def process_single_row(index: int, row: dict, data_base: Path, client: genai.Cli
         return {"index": index, "result_row": result_row, "token_usage": None,
                 "processed": False, "skipped": True, "skip_reason": "could not load images"}
 
-    cam0_bytes, cam1_bytes, joined_bytes = images
+    if len(images) == 4:
+        cam0_bytes, cam1_bytes, cam2_bytes, joined_bytes = images
+    else:
+        cam0_bytes, cam1_bytes, joined_bytes = images
+        cam2_bytes = None
 
     try:
-        result, token_usage = analyze_images(client, model_name, cam0_bytes, cam1_bytes, examples, media_resolution, joined_bytes)
+        result, token_usage = analyze_images(client, model_name, cam0_bytes, cam1_bytes, examples, media_resolution, joined_bytes, cam2_bytes)
 
         is_measurable = result.get("is_measurable", "Unknown")
         result_row["is_measurable"] = is_measurable

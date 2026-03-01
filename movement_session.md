@@ -165,3 +165,8 @@ python add_movement_to_blur.py /path/to/other_data
   - e.g. `data_11_2` → `PQS_blur_by_venue_with_movement_data_11_2.xlsx`
 
 The script reads each venue row from the source xlsx, finds its `movement.json`, and creates one output row per calibration with 5 new columns: `calibration_movement`, `movement_indicator`, `movement_length_cam0`, `movement_length_cam1`, `movement_severity`. Venues without movement data are kept as a single row with empty movement columns.
+
+## End-to-End: Steps to Get Movement Data into PQS Blur
+
+1. **Collect movement data** — run PCM on-device (Windows) or batch (Linux) to produce `movement.json` files per venue under `<data_dir>/<venue_id>/<event_id>/movement/movement.json`
+2. **Add movement to blur** — `python add_movement_to_blur.py <data_dir>` joins `PQS_blur_by_venue.xlsx` with movement JSONs, classifies severity, outputs `output_dir/PQS_blur_by_venue_with_movement_<name>.xlsx`

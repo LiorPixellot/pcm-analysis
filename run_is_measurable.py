@@ -31,6 +31,7 @@ import openpyxl
 from google import genai
 from google.genai import types
 
+from camera_utils import find_cam_image
 from is_measurable import (
     load_config,
     load_venues,
@@ -105,10 +106,7 @@ def find_venue_focus_dir(dataset_dir: Path, venue_id: str) -> Optional[Path]:
             continue
         focus_dir = event_path / "focus"
         if focus_dir.is_dir():
-            # Check that at least CAM0 and CAM1 exist (standard or _rot variants)
-            if (focus_dir / "CAM0_1.jpg").exists() and (focus_dir / "CAM1_1.jpg").exists():
-                return focus_dir
-            if (focus_dir / "CAM0_1_rot.jpg").exists() and (focus_dir / "CAM1_1_rot.jpg").exists():
+            if find_cam_image(focus_dir, "CAM0") and find_cam_image(focus_dir, "CAM1"):
                 return focus_dir
 
     return None
@@ -134,18 +132,23 @@ def process_venue(index: int, venue_row: dict, venue_type: str,
             "skip_reason": "could not load images",
         }
 
-    cam0_bytes, cam1_bytes, _ = images
+    # Handle both 2-cam (3-tuple) and 3-cam (4-tuple) from load_images
+    if len(images) == 4:
+        cam0_bytes, cam1_bytes, cam2_bytes, _ = images
+    else:
+        cam0_bytes, cam1_bytes, _ = images
+        cam2_bytes = None
 
     try:
         if venue_type == "indoor":
             result, token_usage = analyze_indoor(
                 client, model_name, cam0_bytes, cam1_bytes, None, media_resolution,
-                indoor_examples,
+                indoor_examples, cam2_bytes,
             )
         else:
             result, token_usage = analyze_outdoor(
                 client, model_name, cam0_bytes, cam1_bytes, None, media_resolution,
-                outdoor_examples,
+                outdoor_examples, cam2_bytes,
             )
 
         is_measurable = result.get("is_measurable", "Unknown")

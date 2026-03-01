@@ -42,13 +42,22 @@ from is_measurable import (
 )
 
 
-OUTDOOR_PROMPT = """You are analyzing camera images from an OUTDOOR sports venue to determine if conditions allow valid focus measurement.
+_OUTDOOR_INTRO_2CAM = """You are analyzing camera images from an OUTDOOR sports venue to determine if conditions allow valid focus measurement.
 
 The images are from a paired camera setup:
 - CAM0 = right camera
 - CAM1 = left camera
-- joined = side-by-side overlap composition (left half from CAM1, right half from CAM0), if provided
+- joined = side-by-side overlap composition (left half from CAM1, right half from CAM0), if provided"""
 
+_OUTDOOR_INTRO_3CAM = """You are analyzing camera images from an OUTDOOR sports venue to determine if conditions allow valid focus measurement.
+
+The images are from a 3-camera setup:
+- CAM0 = right camera
+- CAM1 = center camera
+- CAM2 = left camera
+Adjacent pairs share overlapping coverage: pair (0,1) covers the right side, pair (1,2) covers the left side."""
+
+OUTDOOR_PROMPT_BODY = """
 ## Check Environmental Conditions
 
 Answer "No" for is_measurable if you see ANY of these:
@@ -138,16 +147,20 @@ def analyze_outdoor(client: genai.Client, model_name: str,
                     cam0_bytes: bytes, cam1_bytes: bytes,
                     joined_bytes: Optional[bytes] = None,
                     media_resolution: Optional[str] = None,
-                    examples: Optional[Dict[str, list]] = None) -> Tuple[dict, dict]:
+                    examples: Optional[Dict[str, list]] = None,
+                    cam2_bytes: Optional[bytes] = None) -> Tuple[dict, dict]:
     """Analyze outdoor venue images for measurability.
 
     Returns (result_dict, token_usage_dict).
     """
+    is_3cam = cam2_bytes is not None
+    intro = _OUTDOOR_INTRO_3CAM if is_3cam else _OUTDOOR_INTRO_2CAM
+
     image_kwargs = {}
     if media_resolution:
         image_kwargs["media_resolution"] = media_resolution
 
-    parts = [types.Part.from_text(text=OUTDOOR_PROMPT)]
+    parts = [types.Part.from_text(text=intro + OUTDOOR_PROMPT_BODY)]
 
     # Insert categorized examples
     if examples:
@@ -181,8 +194,12 @@ def analyze_outdoor(client: genai.Client, model_name: str,
 
     parts.append(types.Part.from_text(text="CAM0 (right camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam0_bytes, **image_kwargs))
-    parts.append(types.Part.from_text(text="CAM1 (left camera):"))
+    parts.append(types.Part.from_text(text="CAM1 (center camera):" if is_3cam else "CAM1 (left camera):"))
     parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam1_bytes, **image_kwargs))
+
+    if cam2_bytes is not None:
+        parts.append(types.Part.from_text(text="CAM2 (left camera):"))
+        parts.append(types.Part.from_bytes(mime_type="image/jpeg", data=cam2_bytes, **image_kwargs))
 
     if joined_bytes is not None:
         parts.append(types.Part.from_text(text="Joined overlap image (left half = CAM1, right half = CAM0):"))

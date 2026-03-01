@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 import openpyxl
+from openpyxl.styles import Font
 
 
 def read_blur_xlsx(xlsx_path: Path) -> tuple[list[str], list[dict]]:
@@ -164,6 +165,7 @@ def main():
     no_setup_json = 0
     no_setups = 0
     empty_venue_id = 0
+    pqs_venue_ids = set()
 
     for row in rows:
         venue_id = str(row.get("PIXELLOT_VENUE_ID", "")).strip()
@@ -175,6 +177,7 @@ def main():
             empty_venue_id += 1
             continue
 
+        pqs_venue_ids.add(venue_id)
         setup_json_path = find_venue_setup_json(dataset_dir, venue_id)
         if setup_json_path is None:
             for col in new_columns:
@@ -220,6 +223,44 @@ def main():
         else:
             matched_max += 1
 
+    # Second pass: venues with setup.json in dataset but not in PQS xlsx
+    dataset_only = 0
+    dataset_only_no_setups = 0
+    for venue_dir in sorted(dataset_dir.iterdir()):
+        if not venue_dir.is_dir():
+            continue
+        venue_id = venue_dir.name
+        if venue_id in pqs_venue_ids:
+            continue
+        setup_json_path = find_venue_setup_json(dataset_dir, venue_id)
+        if setup_json_path is None:
+            continue
+        max_entry, used_fallback, setup_joined_image = extract_max_setup(setup_json_path)
+        if max_entry is None:
+            dataset_only_no_setups += 1
+            continue
+        dataset_only += 1
+        row = {h: "" for h in headers}
+        row["PIXELLOT_VENUE_ID"] = venue_id
+        row["setup_sport_type"] = max_entry.get("sport_type", "")
+        row["max_camera_overlap"] = max_entry.get("max_camera_overlap", "")
+        row["all_spares"] = max_entry.get("all_spares", "")
+        row["setup_severity"] = compute_setup_severity(row["all_spares"])
+        row["left_spare"] = max_entry.get("left_spare", "")
+        row["right_spare"] = max_entry.get("right_spare", "")
+        row["s2_mode_calc"] = max_entry.get("s2_mode_calc", "")
+        row["X_of_center"] = max_entry.get("X_of_center", "")
+        row["Y_from_line"] = max_entry.get("Y_from_line", "")
+        row["height"] = max_entry.get("height", "")
+        row["focals_diff"] = max_entry.get("focals_diff", "")
+        row["cam_angle_diff"] = max_entry.get("cam_angle_diff", "")
+        row["can_improve_by_zoom"] = compute_can_improve_by_zoom(
+            row["left_spare"], row["right_spare"], row["max_camera_overlap"]
+        )
+        row["decision"] = compute_decision(row["setup_severity"], row["can_improve_by_zoom"])
+        row["setup_join_image"] = setup_joined_image
+        rows.append(row)
+
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb = openpyxl.Workbook()
@@ -232,21 +273,36 @@ def main():
     for row_idx, row in enumerate(rows, start=2):  # row 1 is header
         ws.append([row.get(h, "") for h in all_headers])
         url = row.get("setup_join_image", "")
+        cell = ws.cell(row=row_idx, column=setup_join_col)
         if url and isinstance(url, str) and url.startswith("http"):
-            cell = ws.cell(row=row_idx, column=setup_join_col)
             cell.hyperlink = url
             cell.style = "Hyperlink"
+        else:
+            # Try local setup_join.jpg
+            venue_id = str(row.get("PIXELLOT_VENUE_ID", "")).strip()
+            if venue_id:
+                setup_json_path = find_venue_setup_json(dataset_dir, venue_id)
+                if setup_json_path:
+                    jpg_path = setup_json_path.parent / "setup_join.jpg"
+                    if jpg_path.is_file():
+                        cell.hyperlink = jpg_path.resolve().as_uri()
+                        cell.value = jpg_path.name
+                        cell.font = Font(color="0000FF", underline="single")
 
     wb.save(output_path)
     matched = matched_max + matched_fallback
     unmatched = no_venue_dir + no_setup_json + no_setups + empty_venue_id
-    print(f"\nMatched: {matched} (MAX: {matched_max}, fallback largest field_area: {matched_fallback})")
-    print(f"Unmatched: {unmatched}")
+    print(f"\nPQS matched: {matched} (MAX: {matched_max}, fallback largest field_area: {matched_fallback})")
+    print(f"PQS unmatched: {unmatched}")
     print(f"  Venue not in dataset: {no_venue_dir}")
     print(f"  No setup.json found: {no_setup_json}")
     print(f"  Empty setups array: {no_setups}")
     if empty_venue_id:
         print(f"  Empty venue ID: {empty_venue_id}")
+    print(f"Dataset-only venues (not in PQS): {dataset_only}")
+    if dataset_only_no_setups:
+        print(f"  Dataset-only with empty setups array: {dataset_only_no_setups}")
+    print(f"Total output rows: {len(rows)}")
     print(f"Output: {output_path}")
 
 

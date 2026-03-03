@@ -79,9 +79,15 @@ Data directories: `all_data_02_09/` (~5100 entries), `data_11_2/`, `data/16_2_li
 
 ## Focus Severity Thresholds (laplacian_th_calculations.py)
 
-- **NA**: either camera mean intensity < 70 (too dark)
-- **Error**: `focus_abs_dif_rel` > 1.25, or either camera `mid_focus` <= 10
-- **Warning**: `focus_abs_dif_rel` >= 0.7, or either camera `mid_focus` <= 20
+Metrics are computed on an 800x800 crop from each camera's overlap edge. For 3-cam setups, `max_dif_rel` = worst of pairs (0,1) and (1,2), and `min_mid`/`max_mid` consider all 3 cameras.
+
+- **NA**: any camera mean intensity < 50 (too dark)
+- **Error** (any one triggers):
+  - `max_dif_rel` > 1.0 (large difference between camera pairs)
+  - `min_mid` <= 15 (one camera very blurry)
+  - `avg_mean` < 95 AND `min_mid` <= 25 (dark + bad mid)
+  - `max_mid` <= 50 AND `avg_mean` < 100 (all cameras bad)
+- **Warning**: `max_dif_rel` >= 0.5 OR `min_mid` <= 25
 - **Ok**: all values within acceptable ranges
 
 ## Setup Severity Thresholds (enrich_blur_with_setup.py / consolidate_setup_results.py)

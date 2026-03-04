@@ -166,7 +166,58 @@ python add_movement_to_blur.py /path/to/other_data
 
 The script reads each venue row from the source xlsx, finds its `movement.json`, and creates one output row per calibration with 5 new columns: `calibration_movement`, `movement_indicator`, `movement_length_cam0`, `movement_length_cam1`, `movement_severity`. Venues without movement data are kept as a single row with empty movement columns.
 
+## 6. Include Non-PQS Venues in Movement xlsx
+
+Updated `add_movement_to_blur.py` to include venues that have `movement.json` in the dataset but are NOT in `PQS_blur_by_venue.xlsx`. Previously these were silently dropped.
+
+**Change:** Added a second pass after the PQS loop that iterates `movement_data` venues not seen in PQS. These rows get:
+- `PIXELLOT_VENUE_ID` set to the venue_id, all other PQS/blur columns empty
+- Populated movement columns (same as matched venues)
+
+**Result on `data/17_2_windows/`:**
+
+| Category | Venues |
+|---|---|
+| PQS venues with movement data | 8,879 |
+| PQS venues without movement | 4,086 |
+| Dataset-only venues (not in PQS) | **1,137** (newly included) |
+| Total output rows | 58,304 |
+
+Output: `output_dir/PQS_blur_by_venue_with_movement_17_2_windows.xlsx`
+
+Also added `-o` flag for custom output path. Re-ran on S2 and S3 Linux datasets:
+
+| Dataset | PQS matched | Dataset-only (not in PQS) | Total output rows |
+|---|---|---|---|
+| `data/16_2_linux_s2` | 1,161 | **290** | 19,546 |
+| `data/linux_s3_16_2` | 341 | **38** | 14,889 |
+
+Output files:
+- `output_dir/PQS_blur_by_venue_with_movement_16_2_linux_s2_with_all_data.xlsx`
+- `output_dir/PQS_blur_by_venue_with_movement_linux_s3_16_2_with_all_data.xlsx`
+
+## 7. Blend Images and Hyperlinks for with_all_data xlsx
+
+Blend images (Step 3: `batch_blend.py`) already existed on disk for both S2 and S3 datasets — they had been generated previously but never linked to a xlsx for S2.
+
+Ran Step 4 (`add_blend_links_to_xlsx.py`) on both `_with_all_data.xlsx` files to add clickable `current_image`, `reference_image`, `blend_image` columns with `file:///` hyperlinks.
+
+| Dataset | Rows with blend hyperlinks | Missing images | No calibration |
+|---|---|---|---|
+| `data/16_2_linux_s2` | **3,661** | 4,081 | 11,804 |
+| `data/linux_s3_16_2` | **924** | 1,341 | 12,624 |
+
+Commands:
+```bash
+venv/bin/python add_blend_links_to_xlsx.py data/16_2_linux_s2 --xlsx output_dir/PQS_blur_by_venue_with_movement_16_2_linux_s2_with_all_data.xlsx --output output_dir/PQS_blur_by_venue_with_movement_16_2_linux_s2_with_all_data.xlsx
+venv/bin/python add_blend_links_to_xlsx.py data/linux_s3_16_2 --xlsx output_dir/PQS_blur_by_venue_with_movement_linux_s3_16_2_with_all_data.xlsx --output output_dir/PQS_blur_by_venue_with_movement_linux_s3_16_2_with_all_data.xlsx
+```
+
+Windows (`data/17_2_windows`) skipped — blend images not generated yet.
+
 ## End-to-End: Steps to Get Movement Data into PQS Blur
 
 1. **Collect movement data** — run PCM on-device (Windows) or batch (Linux) to produce `movement.json` files per venue under `<data_dir>/<venue_id>/<event_id>/movement/movement.json`
 2. **Add movement to blur** — `python add_movement_to_blur.py <data_dir>` joins `PQS_blur_by_venue.xlsx` with movement JSONs, classifies severity, outputs `output_dir/PQS_blur_by_venue_with_movement_<name>.xlsx`
+3. **Create blend images** — `python batch_blend.py <data_dir>` creates current/reference/blend panoramas on disk
+4. **Add blend hyperlinks** — `python add_blend_links_to_xlsx.py <data_dir> --xlsx <movement_xlsx>` adds clickable `file:///` hyperlinks to the xlsx

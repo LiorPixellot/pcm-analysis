@@ -31,9 +31,10 @@ This runs internally:
 2. **`laplacian_th_calculations.py`** — classifies severity based on thresholds
 3. **`concat_blur.py`** — joins with PQS blur xlsx
 4. **`run_is_measurable.py`** — Gemini AI measurability (needs GCP credentials)
-5. **`detect_issues.py`** (2-cam) or **`detect_issues_3cam.py`** (3-cam) — Gemini AI issue detection
-6. **`concat_with_is_measurable.py`** — joins measurability results
-7. **`analyze_blur_severity.py`** — produces plots and stats
+5. **`concat_with_is_measurable.py`** — joins measurability results; **overrides `Focus_severity` to `NA` when `is_measurable=No`**
+6. **`detect_issues.py`** (2-cam) or **`detect_issues_3cam.py`** (3-cam) — Gemini AI issue detection
+7. **`concat_with_detect_issues.py`** — joins detect_issues results
+8. **`analyze_blur_severity.py`** — produces plots and stats
 
 ### Phase 2: Movement Analysis
 
@@ -81,6 +82,10 @@ python enrich_blur_with_setup.py --dataset <DATASET> --blur-xlsx <BLUR_XLSX> -o 
 | **Movement** | `calibration_movement`, `movement_indicator`, `movement_length_cam0/cam1/cam2`, `movement_severity` |
 | **Blend images** | `current_image`, `reference_image`, `blend_image` (clickable `file:///` hyperlinks) |
 | **Setup** (optional) | `setup_severity`, `all_spares`, `max_camera_overlap`, `left_spare`, `right_spare`, `can_improve_by_zoom`, `decision`, `setup_join_image`, etc. (15 columns) |
+
+### Focus_severity override
+
+`Focus_severity` is initially computed by Laplacian thresholds (Ok/Warning/Error/NA based on dark field detection and focus metrics). In step 5 (`concat_with_is_measurable.py`), if `is_measurable=No`, `Focus_severity` is overridden to `NA`. This means non-measurable venues (dark field, snow, fog, obstructions) always get `Focus_severity=NA` regardless of their Laplacian values.
 
 ---
 

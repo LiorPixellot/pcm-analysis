@@ -4,38 +4,161 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-PCM Push is a camera focus quality analysis pipeline for sports venues. It detects focus problems, condensation, and environmental issues (dark field, obstructions) across paired camera setups (CAM0/CAM1 = right/left cameras).
+PCM Push is a camera quality analysis pipeline for sports venues. It has **3 separate flows**:
 
-## Pipeline Scripts (run in order)
+1. **Focus Flow** — Detects focus problems, condensation, and environmental issues (dark field, obstructions) using Laplacian metrics + Gemini AI
+2. **Movement Flow** — Compares current camera images vs reference calibration images using optical flow to detect camera movement
+3. **Setup Flow** — Analyzes camera geometry/coverage to determine if zoom or repositioning is needed
+
+Each flow produces an xlsx with per-venue results. All flows auto-detect 2-cam (S2) vs 3-cam (S3) setups via `camera_utils.py`.
+
+
+---
+
+## Flow 1: Focus (`run_full_pipeline.py`)
+
+**Runbook:** `focus_finel.md`
+
+Orchestrates 7 steps, auto-detects 2 vs 3 cameras:
+
+1. `run_laplacian_pipeline.py` → `laplacian_calculations.py` + `laplacian_th_calculations.py` (focus metrics + severity)
+2. `concat_blur.py` — joins with PQS blur xlsx
+3. `run_is_measurable.py` — Gemini AI measurability (skippable with `--is-measurable-csv`)
+4. `concat_with_is_measurable.py` — joins measurability; **overrides `Focus_severity` to `NA` when `is_measurable=No`**
+5. `detect_issues.py` (2-cam) or `detect_issues_3cam.py` (3-cam) — Gemini AI issue detection (skippable with `--detect-issues-csv`)
+6. `concat_with_detect_issues.py` — joins detect_issues results
+7. `analyze_blur_severity.py` — plots + stats
 
 ```bash
-# Step 1: Compute Laplacian focus metrics from camera images
-python laplacian_calculations.py <data_dir>
+# Run the full focus analysis pipeline
+python run_full_pipeline.py <data_dir> <blur_xlsx>
 
-# Step 2: Classify severity (Ok/Warning/Error/NA) from Step 1 output
-python laplacian_th_calculations.py <step1_output.csv>
+# With pre-computed AI results (skip expensive Gemini calls)
+python run_full_pipeline.py <data_dir> <blur_xlsx> \
+  --is-measurable-csv <path> --detect-issues-csv <path>
 
-# Step 3: AI measurability + quality issue detection (reads Step 2 CSV, needs GCP credentials)
-python is_measurable.py --input <step2_output.csv> --data-dir <data_dir>
-
-# Alternative to Step 3: Xlsx-driven issue detection (one event per venue, like run_is_measurable.py)
-python detect_issues.py --dataset <data_dir> --blur-xlsx <blur_xlsx>
-
-# Post-pipeline: Consolidate two pipeline runs into best-per-venue xlsx
-# Picks the best row per venue, generates joined CAM0+CAM1 images, and adds image hyperlink columns
-python consolidate_runs.py <run1_xlsx> <run2_xlsx> -o <output.xlsx>
-
-# Setup analysis: Enrich blur xlsx with camera geometry data (setup.json)
-# Adds 15 columns: severity, coverage spares, zoom improvability, decision
-python enrich_blur_with_setup.py --dataset <data_dir> --blur-xlsx <blur_xlsx> -o <output.xlsx>
-
-# Setup analysis: Standalone setup xlsx (one row per venue, 20 columns, no blur join)
-python consolidate_setup_results.py <data_dir>
+# With options
+python run_full_pipeline.py <data_dir> <blur_xlsx> \
+  --output-dir output_dir/<NAME> \
+  --examples-dir examples/ \
+  --limit 10 \
+  --num-cameras 3
 ```
 
-Setup analysis is a cross-repo process — see `new_dataset_runbook_setup.md` for the full runbook including `batch_setup.py` (in `proactive-camera-monitoring` repo).
+### Focus Severity Thresholds (laplacian_th_calculations.py)
 
-Each script creates a timestamped subdirectory under `output_dir/` (e.g., `output_dir/laplacian_2025-02-12_14-30/`).
+Metrics are computed on an 800x800 crop from each camera's overlap edge. For 3-cam setups, `max_dif_rel` = worst of pairs (0,1) and (1,2), and `min_mid`/`max_mid` consider all 3 cameras.
+
+- **NA**: any camera mean intensity < 50 (too dark)
+- **Error** (any one triggers):
+  - `max_dif_rel` > 1.0 (large difference between camera pairs)
+  - `min_mid` <= 15 (one camera very blurry)
+  - `avg_mean` < 95 AND `min_mid` <= 25 (dark + bad mid)
+  - `max_mid` <= 50 AND `avg_mean` < 100 (all cameras bad)
+- **Warning**: `max_dif_rel` >= 0.5 OR `min_mid` <= 25
+- **Ok**: all values within acceptable ranges
+
+### Few-Shot Examples
+
+`is_measurable.py` loads example images from subdirectories under `examples/`:
+- `examples/examples_of_dark_field/` — dark field reference
+- `examples/examples_of_dark_field_ambient/` — ambient-lit but still too dark
+- `examples/examples_of_object_in_field/` — obstructed camera view
+- `examples/Condensation/` — all `.jpg`/`.png` files loaded as condensation examples
+
+`detect_issues.py` loads categorized examples from subdirectories under `examples/` (override with `--use-examples <dir>`):
+- `examples/joined/` — joined image showing sharpness difference between cameras
+- `examples/change_focus/` — focus change visible within a single camera image
+- `examples/complete_focus/` — completely smoothed camera with bad focus all over the lens
+
+Each category has a label constant (`EXAMPLE_JOINED_LABEL`, `EXAMPLE_CHANGE_FOCUS_LABEL`, `EXAMPLE_COMPLETE_FOCUS_LABEL`) and is registered in `EXAMPLE_CATEGORIES`.
+
+To add a new category to `is_measurable.py`: add image to `examples/examples_of_<category>/`, register the path in `load_examples()`, create an `EXAMPLE_<CATEGORY>_LABEL` prompt constant, and wire it into `analyze_images()`.
+
+To add a new category to `detect_issues.py`: create `examples/<category>/` with images, add an `EXAMPLE_<CATEGORY>_LABEL` constant, and append to `EXAMPLE_CATEGORIES`.
+
+---
+
+## Flow 2: Movement
+
+**Runbook:** `new_dataset_runbook_for_movment.md`
+
+Compares current camera images vs calibration reference images using optical flow.
+
+### Steps
+
+1. **`batch_movement.py`** — Optical flow computation (runs from scrapanyzer repo, uses pcm_push venv)
+   - Output: `<venue>/<event>/movement/movement.json`
+   - Idempotent — skips venues with existing `movement.json`
+
+2. **`add_movement_to_blur.py`** — Joins movement data with `PQS_blur_by_venue.xlsx`, classifies movement severity
+   - Output: `output_dir/PQS_blur_by_venue_with_movement_<DATASET>.xlsx`
+   - New columns: `calibration_movement`, `movement_indicator`, `movement_length_cam0/1/2`, `movement_severity`
+
+3. **`batch_blend.py`** — Creates panoramic blend images (current vs reference, 50/50 alpha blend)
+   - Output: `<venue>/<event>/movement/movement_<venue>_pano_<sport>_{current,reference,blend}.jpg`
+   - Idempotent
+
+4. **`add_blend_links_to_xlsx.py`** — Adds clickable `file:///` hyperlinks to the movement xlsx (modifies in-place)
+
+5. **(Optional) `consolidate_runs.py`** — Merges two dataset runs, picks best row per venue. Uses hardcoded paths at top of file — edit lines 21-27 before running.
+
+```bash
+# Step 1: Movement analysis (from scrapanyzer repo, use pcm_push venv)
+cd /home/liorb/work/proactive-camera-monitoring/venue/scrapanyzer
+/home/liorb/work/pcm_push/venv/bin/python3 batch_movement.py /home/liorb/work/pcm_push/data/<DATASET>
+
+# Steps 2-4: From pcm_push repo
+cd /home/liorb/work/pcm_push
+python3 add_movement_to_blur.py data/<DATASET>
+python3 batch_blend.py data/<DATASET>
+python3 add_blend_links_to_xlsx.py data/<DATASET>
+```
+
+---
+
+## Flow 3: Setup
+
+**Runbook:** `new_dataset_runbook_setup.md`
+
+Analyzes camera geometry/coverage (field area, spare pixels, overlap) to determine if zoom adjustment or on-site repositioning is needed.
+
+### Steps
+
+1. **`batch_setup.py`** — Runs setup analysis on all venues (from proactive-camera-monitoring repo)
+   - Output: `<venue>/<ts>/setup/setup.json`, `setup.csv`, `setup_join.jpg`
+   - Idempotent — skips venues with existing `setup.json`
+   - Requires `collected/` + `multisportcalibration/` directories
+   - **Note:** The setup code (in proactive-camera-monitoring) was designed for production and includes S3 uploads. `batch_setup.py` automatically sets `PRO_CAM_MON_OFFLINE=1` to skip S3 uploads — no manual action needed. The Movement flow does NOT use this variable.
+
+2. **`enrich_blur_with_setup.py`** — Joins setup data with blur xlsx, adds 15 columns (severity, decision, spare metrics, zoom mode, etc.)
+   - Output: enriched xlsx
+
+3. **(Optional) `consolidate_setup_results.py`** — Standalone setup xlsx without joining to blur data
+   - Output: `<DATASET>/setup_results.xlsx`
+
+```bash
+# Step 1: Run setup analysis (from proactive-camera-monitoring repo)
+cd /home/liorb/work/proactive-camera-monitoring
+PYTHONPATH=venue/scrapanyzer python venue/scrapanyzer/batch_setup.py <DATASET>
+
+# Step 2a: Enrich blur xlsx with setup data
+cd /home/liorb/work/pcm_push
+python enrich_blur_with_setup.py --dataset <DATASET> --blur-xlsx <BLUR_XLSX> -o output_dir/pqs_blur_by_venue_with_setup.xlsx
+
+# Step 2b (alternative): Standalone setup xlsx
+python consolidate_setup_results.py <DATASET>
+```
+
+### Setup Severity & Decision Logic
+
+- **Error**: `all_spares` > 3000
+- **Warning**: `all_spares` >= 2000
+- **Ok**: `all_spares` < 2000
+- **can_improve_by_zoom**: `"Yes"` if `(left_spare + right_spare) / max_camera_overlap / 2` is in [0.7, 1.3]
+- **decision**: Error+Yes → `maintain_remote`, Error+No → `maintain_on_site`, Warning → `watch`, Ok → `ok`
+
+---
 
 ## Architecture
 
@@ -58,14 +181,34 @@ Both `run_is_measurable.py` and `detect_issues.py` are xlsx-driven (one event pe
 
 **`run_is_measurable.py`** sends only CAM0 and CAM1 images to the indoor/outdoor analyzers (joined image is skipped — CAM0+CAM1 have all info needed for measurability).
 
-## Configuration Files
+## 2-Camera vs 3-Camera Support
 
-- `config.yaml` — Gemini model name, GCP project/location, `max_workers`, retry settings, `media_resolution`
-- `venues.yaml` — Venue filter: list venue IDs to process a subset, or set `full: true` for all venues
-- `cost.yaml` — Token pricing per model (threshold-based tiered pricing per 1M tokens)
-- `service-account-key.json` — GCP credentials (auto-detected by scripts if `GOOGLE_APPLICATION_CREDENTIALS` not set)
+**`camera_utils.py`** provides `detect_dataset_camera_count()` and `find_cam_image()` — all scripts auto-detect camera count.
 
-## Data Directory Structure
+| Aspect | 2-cam (S2/Windows) | 3-cam (S3) |
+|---|---|---|
+| **Images** | `CAM0_1.jpg`, `CAM1_1.jpg` | `CAM0_0.jpg`, `CAM1_0.jpg`, `CAM2_0.jpg` |
+| **Camera order** | CAM0=right, CAM1=left | CAM0=right, CAM1=center, CAM2=left |
+| **Panorama** | CAM1 + CAM0 | CAM2 + CAM1 + CAM0 |
+| **Issue detection** | `detect_issues.py` | `detect_issues_3cam.py` |
+
+### Directory usage per flow
+
+| Flow | Reads from (in venue) | Writes to (in venue) | Excel output |
+|---|---|---|---|
+| **Focus** | `focus/` | — | `output_dir/` |
+| **Movement** | `collected/`, calibrations | `movement/` | `output_dir/` |
+| **Setup** | `collected/`, `multisportcalibration/` | `setup/` | `output_dir/` |
+
+linux datasets have `collected/` directories instead of `focus/`. Only the **Focus flow** needs symlinks — Movement and Setup read `collected/` directly:
+```bash
+# Only needed for Focus flow on S3 datasets
+find data/<S3_DATASET>/ -type d -name collected -exec sh -c \
+  'ln -sf collected "$(dirname "$1")/focus"' _ {} \;
+```
+this will create Data Directory Structure
+
+
 
 ```
 <data_dir>/<venue_id>/<event_id>/focus/
@@ -75,54 +218,27 @@ Both `run_is_measurable.py` and `detect_issues.py` are xlsx-driven (one event pe
     focus.json        # Ground truth focus metrics from production
 ```
 
-Data directories: `all_data_02_09/` (~5100 entries), `data_11_2/`, `data/16_2_linux_s2/`, `data/18_2_linux_s2/`.
 
-## Focus Severity Thresholds (laplacian_th_calculations.py)
+## Configuration Files
 
-Metrics are computed on an 800x800 crop from each camera's overlap edge. For 3-cam setups, `max_dif_rel` = worst of pairs (0,1) and (1,2), and `min_mid`/`max_mid` consider all 3 cameras.
-
-- **NA**: any camera mean intensity < 50 (too dark)
-- **Error** (any one triggers):
-  - `max_dif_rel` > 1.0 (large difference between camera pairs)
-  - `min_mid` <= 15 (one camera very blurry)
-  - `avg_mean` < 95 AND `min_mid` <= 25 (dark + bad mid)
-  - `max_mid` <= 50 AND `avg_mean` < 100 (all cameras bad)
-- **Warning**: `max_dif_rel` >= 0.5 OR `min_mid` <= 25
-- **Ok**: all values within acceptable ranges
-
-## Setup Severity Thresholds (enrich_blur_with_setup.py / consolidate_setup_results.py)
-
-- **Error**: `all_spares` > 3000
-- **Warning**: `all_spares` >= 2000
-- **Ok**: `all_spares` < 2000
-- **can_improve_by_zoom**: `"Yes"` if `(left_spare + right_spare) / max_camera_overlap / 2` is in [0.7, 1.3]
-- **decision**: Error+Yes → `maintain_remote`, Error+No → `maintain_on_site`, Warning → `watch`, Ok → `ok`
-
-## Few-Shot Examples
-
-`is_measurable.py` loads example images from subdirectories under `examples/`:
-- `examples/examples_of_dark_field/` — dark field reference
-- `examples/examples_of_dark_field_ambient/` — ambient-lit but still too dark
-- `examples/examples_of_object_in_field/` — obstructed camera view
-- `examples/Condensation/` — all `.jpg`/`.png` files loaded as condensation examples
-
-`detect_issues.py` loads categorized examples from subdirectories under `examples/` (override with `--use-examples <dir>`):
-- `examples/joined/` — joined image showing sharpness difference between cameras
-- `examples/change_focus/` — focus change visible within a single camera image
-- `examples/complete_focus/` — completely smoothed camera with bad focus all over the lens
-
-Each category has a label constant (`EXAMPLE_JOINED_LABEL`, `EXAMPLE_CHANGE_FOCUS_LABEL`, `EXAMPLE_COMPLETE_FOCUS_LABEL`) and is registered in `EXAMPLE_CATEGORIES`.
-
-To add a new category to `is_measurable.py`: add image to `examples/examples_of_<category>/`, register the path in `load_examples()`, create an `EXAMPLE_<CATEGORY>_LABEL` prompt constant, and wire it into `analyze_images()`.
-
-To add a new category to `detect_issues.py`: create `examples/<category>/` with images, add an `EXAMPLE_<CATEGORY>_LABEL` constant, and append to `EXAMPLE_CATEGORIES`.
+- `config.yaml` — Gemini model name, GCP project/location, `max_workers`, retry settings
+- `venues.yaml` — Venue filter: list venue IDs to process a subset, or set `full: true` for all venues
+- `cost.yaml` — Token pricing per model (threshold-based tiered pricing per 1M tokens)
+- `service-account-key.json` — GCP credentials (auto-detected by scripts if `GOOGLE_APPLICATION_CREDENTIALS` not set)
 
 ## Dependencies
 
 Python 3.12 with venv. No `requirements.txt` — key packages:
-- **opencv-python** (`cv2`) — `laplacian_calculations.py`
-- **openpyxl** — `concat_blur.py`, `concat_with_is_measurable.py`, `enrich_blur_with_setup.py`, `consolidate_setup_results.py` (Excel output with clickable hyperlinks)
+- **opencv-python** (`cv2`) — `laplacian_calculations.py`, `batch_movement.py`, `batch_blend.py`
+- **openpyxl** — Excel output with clickable hyperlinks (multiple scripts)
 - **Pillow** (`PIL`) — `is_measurable.py`, `detect_issues.py`, `consolidate_runs.py`
 - **google-genai** (`from google import genai`) — Gemini API client
 - **pandas** + **plotly** — `analyze_blur_severity.py` (reads both CSV and XLSX input)
 - **PyYAML** — config parsing
+- **boto3** — setup analysis (S3 access)
+
+## Related Documentation
+
+- `focus_finel.md` — full focus pipeline documentation with output column descriptions
+- `new_dataset_runbook_for_movment.md` — movement flow runbook with troubleshooting
+- `new_dataset_runbook_setup.md` — setup flow runbook with troubleshooting

@@ -11,6 +11,12 @@ Evaluate Gemini AI + Laplacian predictions against human-annotated ground truth 
 - `service-account-key.json` — GCP credentials for Gemini API
 - `config.yaml` — model name, project, workers, retry settings
 
+## Dataset & Annotation File
+
+- **Annotation file**: `complete_annotation.csv` (default), overridable via `--annotations <path>`
+- **Dataset**: No explicit dataset directory. Image paths are embedded in the CSV columns (`cam0_image`, `cam1_image`, `joined_image`). The `focus_dir` is derived from the parent directory of `cam0_image`.
+- **Path format**: `annotation_data/<date>/<system_id>/<event_id>/focus/<image>`
+
 ## Pipeline Steps
 
 ```

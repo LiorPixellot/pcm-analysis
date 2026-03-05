@@ -242,3 +242,20 @@ Python 3.12 with venv. No `requirements.txt` — key packages:
 - `focus_finel.md` — full focus pipeline documentation with output column descriptions
 - `new_dataset_runbook_for_movment.md` — movement flow runbook with troubleshooting
 - `new_dataset_runbook_setup.md` — setup flow runbook with troubleshooting
+
+## Cross-Repository Dependencies
+
+pcm_push calls scripts from `/home/liorb/work/proactive-camera-monitoring/venue/scrapanyzer/` as subprocesses. No Python imports cross the repo boundary — pcm_push reads the JSON outputs these scripts produce.
+
+### Movement Flow → `batch_movement.py`
+- **Script**: `venue/scrapanyzer/batch_movement.py`
+- **Dependencies**: `image_movement_calc.py`, `execution_context.py`
+- **Output read by pcm_push**: `<venue>/<event>/movement/movement.json`
+- **How to run**: from scrapanyzer dir, using pcm_push venv
+
+### Setup Flow → `batch_setup.py`
+- **Script**: `venue/scrapanyzer/batch_setup.py`
+- **Dependencies**: `run_all_setup.py`, `camera_calibration.py`, `execution_context.py`, `aws_utils.py`
+- **Output read by pcm_push**: `<venue>/<event>/setup/setup.json`, `setup.csv`, `setup_join.jpg`
+- **How to run**: from proactive-camera-monitoring root, with `PYTHONPATH=venue/scrapanyzer`
+- **Env var**: `PRO_CAM_MON_OFFLINE=1` (set automatically by batch_setup.py)
